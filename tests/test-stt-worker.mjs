@@ -23,7 +23,7 @@ globalThis.fetch=async (url,options)=>{
  const glossary=m.get('prompt');assert.ok(glossary&&glossary.includes('СКБ')&&glossary.includes('CalTopo'));
  assert.ok(!glossary.includes('Севлиево')&&!glossary.includes('Дряново')&&!glossary.includes('Люботрън'));
  assert.ok(!glossary.includes('Джеймс Баучер')&&!glossary.includes('Лозенец'));
- assert.equal(glossary.split(': ')[1].replace(/\\.$/,'').split(', ').length,34);
+ assert.equal(glossary.split(': ')[1].split(', ').length,34);
  count++;
  return new Response(JSON.stringify(groqStatus===200?{text:groqText,segments:groqSegments}:{error:{type:'rate_limit'}}),{status:groqStatus,headers:{'Content-Type':'application/json'}});
 };
