@@ -7,6 +7,7 @@ const origin='https://spasitelenclub.com';
 const issuer=origin;
 const nonce=new Map();
 let count=0,groqStatus=200,groqText='Екип Алфа достигна сборния пункт.',fallbackText='Екип Бета се завърна.';
+let groqSegments=[];
 let fallbackCalls=0;
 const env={ALLOWED_ORIGIN:origin,EXPECTED_ISSUER:issuer,STT_HMAC_SECRET:secret,
  GROQ_API_KEY:'fake-groq-key',
@@ -19,8 +20,12 @@ globalThis.fetch=async (url,options)=>{
  assert.equal(url,'https://api.groq.com/openai/v1/audio/transcriptions');
  assert.equal(options.headers.Authorization,'Bearer fake-groq-key');
  const m=options.body;assert.equal(m.get('language'),'bg');assert.equal(m.get('model'),'whisper-large-v3');
+ const glossary=m.get('prompt');assert.ok(glossary&&glossary.includes('СКБ')&&glossary.includes('CalTopo'));
+ assert.ok(!glossary.includes('Севлиево')&&!glossary.includes('Дряново')&&!glossary.includes('Люботрън'));
+ assert.ok(!glossary.includes('Джеймс Баучер')&&!glossary.includes('Лозенец'));
+ assert.equal(glossary.split(': ')[1].replace(/\\.$/,'').split(', ').length,34);
  count++;
- return new Response(JSON.stringify(groqStatus===200?{text:groqText}:{error:{type:'rate_limit'}}),{status:groqStatus,headers:{'Content-Type':'application/json'}});
+ return new Response(JSON.stringify(groqStatus===200?{text:groqText,segments:groqSegments}:{error:{type:'rate_limit'}}),{status:groqStatus,headers:{'Content-Type':'application/json'}});
 };
 function b64(raw){return Buffer.from(raw).toString('base64url');}
 function ticket(overrides={}){
@@ -52,10 +57,30 @@ try{
  assert.equal(data.provider,'cloudflare');assert.equal(data.text,fallbackText);assert.equal(fallbackCalls,1);
  groqStatus=200;groqText='  ';r=await worker.fetch(request(ticket()),env);data=await r.json();
  assert.equal(r.status,422);assert.equal(data.code,'no_speech');assert.equal(fallbackCalls,1);
+ // A whole glossary or a contiguous glossary recitation must never be a LOG entry.
+ groqText='Спасителна акция. Термини: Алфа, Браво, Чарли, офроуд, ДКА, НИМ, ЕТА, CalTopo, ретранслатор, САК, К9, СКБ, ПСС, чекпойнт, трак, Селимица, Черни връх, Боерица, Кумата, Алеко, щаб, разчистване, издирване, обход, заслон, сборен пункт, доброволец, маршрут, екипировка, отводняване, евакуация, резачка, шланг, смукател.';
+ r=await worker.fetch(request(ticket()),env);data=await r.json();
+ assert.equal(r.status,422);assert.equal(data.code,'no_speech');
+ groqText='Алфа, Браво, Чарли, офроуд, ДКА, НИМ';
+ r=await worker.fetch(request(ticket()),env);data=await r.json();
+ assert.equal(r.status,422);assert.equal(data.code,'no_speech');
+ // No-speech metrics across all segments must reject hallucinations despite nonempty text.
+ groqText='Екип Алфа пристигна.';groqSegments=[{no_speech_prob:0.98,avg_logprob:-1.8}];
+ r=await worker.fetch(request(ticket()),env);data=await r.json();
+ assert.equal(r.status,422);assert.equal(data.code,'no_speech');
+ // A single noisy segment among clear segments should be reviewable, not discarded.
+ groqSegments.push({no_speech_prob:0.01,avg_logprob:-0.2});
+ r=await worker.fetch(request(ticket()),env);data=await r.json();
+ assert.equal(r.status,200);assert.equal(data.text,groqText);
+ assert.equal(data.quality.status,'suspicious');
+ // Clear short rescue report using terms from the prompt remains valid.
+ groqSegments=[];groqText='Екип Алфа достигна сборния пункт.';
+ r=await worker.fetch(request(ticket()),env);data=await r.json();
+ assert.equal(r.status,200);assert.equal(data.text,groqText);
  const huge=Buffer.alloc(8*1024*1024+1,5);
  r=await worker.fetch(request(ticket(),{bytes:huge}),env);assert.equal(r.status,413);
  const prev=env.STT_RATE_LIMIT;env.STT_RATE_LIMIT={limit:async()=>({success:false})};
  r=await worker.fetch(request(ticket()),env);assert.equal(r.status,429);env.STT_RATE_LIMIT=prev;
  const missingNonce={...env,STT_NONCES:undefined};r=await worker.fetch(request(ticket()),missingNonce);assert.equal(r.status,503);
- console.log('PASS: STT Worker HMAC, CORS, Groq, Cloudflare fallback, replay, silence, quota, size, no-secrets.');
+ console.log('PASS: STT Worker HMAC, CORS, Groq context, prompt echo guard, no-speech segments, fallback, replay, quota, size, no-secrets.');
 }finally{globalThis.fetch=originalFetch;}
