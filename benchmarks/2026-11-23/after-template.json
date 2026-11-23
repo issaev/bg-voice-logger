@@ -1,0 +1,172 @@
+{
+  "version": null,
+  "conditions": null,
+  "scenarios": [
+    {
+      "id": "PERF-01",
+      "metric": "html_http_only",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-02",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-03",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-04",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-05",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-06",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-07",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-08",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-09",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-10",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-11",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-12",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-13",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-14",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    },
+    {
+      "id": "PERF-15",
+      "metric": "end_to_end",
+      "status": "not_run",
+      "n": 0,
+      "p50_ms": null,
+      "p95_ms": null,
+      "errors": null,
+      "ui_ready_ms": null,
+      "fresh_google_ms": null
+    }
+  ],
+  "comparison_note": "Populate only measured comparable results. Improvement=(before-after)/before*100; absolute_ms=before-after. Positive means faster. Never compare HTML-only with UI-ready."
+}

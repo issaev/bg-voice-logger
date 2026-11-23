@@ -1,0 +1,73 @@
+BG VOICE LOGGER — REPEATABLE BASELINE PROTOCOL / 2026-11-23
+
+1. Safety gate
+No production writes, deployments, cache clearing, IndexedDB deletion or queue migration.
+Verify deployed GAS source matches inspected bundle and document reads do not repair/write Sheets.
+Use a new dedicated browser profile and test identity; never reuse a profile with unknown pending operations.
+The application auto-syncs after login/online/visibility/timer: establish empty queue before authenticated tests.
+PERF-10/11/14/15 require explicit isolated test incident/environment and write authorization.
+Use approved existing non-sensitive media fixtures with known sizes for PERF-12/13.
+
+2. Record conditions
+Date/time/timezone, OS/device/CPU/RAM, browser exact version, network type and location,
+WordPress plugin, JS embedded build, asset SHA, deployed GAS version, SW version,
+same test identity, document row/index counts, media sizes/MIME/durations, queue composition.
+Never save tokens, cookies, signed URLs, document content, user identifiers or unredacted HAR.
+Record schema/counts and aggregate timing only. Restrict performance artifacts accordingly.
+
+3. Match two load conditions
+Cold-client: isolated NEW test profile, not clearing an existing profile; CDN state recorded, not forced.
+Warm-client: same dedicated profile and fixture; repeat at least10 times sequentially.
+Capture first observation separately. Our curl baseline is NOT cold/warm browser and cannot substitute.
+For credible p95 collect at least40 (prefer100) comparable samples; with10 mark p95 unreliable/unreported.
+Do not mix file sizes, versions, dates, profiles or first/warm conditions into one distribution.
+
+4. Timing endpoints
+PERF-01 navigation -> UI-ready (interactive app shell); separately -> fresh Google completion if applicable.
+PERF-02 login -> fresh incident list; record human OAuth time separately from automated network time.
+PERF-03 incident click -> visible data; separately -> confirmed fresh Google data.
+PERF-04..07 existing incident tab -> visible LOG/INFO/TECH/TEAM; distinguish initial shared document fetch.
+PERF-08 switch tabs with data loaded -> next rendered frame; count extra REST requests (expected0).
+PERF-09 refresh click -> fresh response committed to UI, not cached snapshot appearance.
+PERF-10 local durable LOG save and server ack as separate metrics, include refresh completion.
+PERF-11 same for INFO, include conflict/no-op outcomes separately.
+PERF-12 play click -> first audible playback AND complete download; fixed known media sizes, cold/warm media cache.
+PERF-13 preview first-visible AND full original first-visible; fixed photo dimensions/bytes.
+PERF-14 create click -> confirmed new incident usable; isolated test only.
+PERF-15 fixed queue composition -> all server acknowledgments AND final fresh data; retries counted.
+
+5. Evidence collection
+Chrome DevTools Network/Performance in dedicated profile after safety gate. Capture request count,
+transferred/decoded bytes, DNS/connect/TLS/TTFB/download where browser exposes them,
+cache status, HTTP status, retries, main-thread/paint times. Do not export raw HAR with credentials.
+Existing bridge total cannot split WP/GAS/Sheets. Proposed approved instrumentation must add
+sanitized correlation/spans and builds at each layer. Never label whole bridge time 'GAS time'.
+If insufficient access, mark not_run with reason, not zero. Null is not zero.
+
+6. Repeat public HTTP subset
+Copy benchmark.py into a NEW empty run directory; run python benchmark.py --samples 10 there.
+It writes beside the script: never rerun the original baseline copy, as that overwrites results.
+GET only; no cookies or content retained.
+Keep same client/curl/network and spacing. Do not compare its HTML duration with browser UI-ready.
+
+7. Correctness/regression gates (isolated test only)
+Transcription: same fixture -> one text event; retry never duplicates ID.
+Audio: record -> durable local ack -> interrupted upload -> Safari restart -> resume -> single playable
+remote original on another device, correct checksum/MIME. Denied/quota local save must show unsaved,
+even with zero queue; no false all-synced. Network timeout after server commit must be idempotent.
+Photo: preview/original, restart retry, one index entry; access denied for unrelated identity.
+Offline queue: mixed LOG/INFO/photo/audio, reconnect, close/reopen, preserve pending/conflict states.
+Sheets manual edits: modify test field/row externally, retry stale client -> conflict/row_moved,
+never silently overwrite; unchanged writes remain no-op. Test row insertion and dynamic INFO structure.
+Cache: user switch, stale snapshot label, fresh revalidation, no cross-user media/document exposure.
+Read-only check: repeated document read must not move embedded images or modify test sheet cells.
+
+8. Before/after
+Populate after-template.json only with measurements, exact version/build and matching conditions.
+Compare p50, min, mean, max and p95 only with enough samples; include errors and retries.
+absolute_ms=before-after; improvement_percent=(before-after)/before*100.
+Report UI-ready improvement separately from freshGoogle and first-play separately from full-download.
+If a scenario was not measured in baseline, do not invent an improvement percentage.
+Accept no performance win that loses/duplicates data or increases unhandled failures.
+Future release rollback must retain compatible queue schema/data and revert code without clearing
+pending entries; verify idempotency before replay. No rollback or deployment executed in this audit.
