@@ -1,4 +1,4 @@
-# BG Voice Logger — public source snapshot (v0.7.0)
+# BG Voice Logger — public source development candidate (v0.7.1)
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script
@@ -42,9 +42,13 @@ playback duration. The referenced `benchmark.py` runner was not supplied.
 
 ### Project status
 
-Version 0.7.0. iOS/Safari IndexedDB audio reliability and sync-status
-correctness remain subjects of testing. Do not deploy changes before full
-backup, test incident validation and explicit release approval.
+**Branch `fix/v0.7.1-reliability`: v0.7.1 development candidate, NOT deployed.**
+The current known live baseline is v0.7.0; user-reported iPhone usage is working.
+The new build fixes six P1 issues and requires a coordinated update of WordPress
+and Google Apps Script for unrestricted INFO comments. It does not touch Cloudflare STT.
+Read [v0.7.1 upgrade and rollback guide](docs/UPGRADE_V071_BG.md).
+Do not deploy before dedicated test-incident validation, actual iPhone testing,
+a backup of current deployments, and explicit release approval.
 
 ### License
 
