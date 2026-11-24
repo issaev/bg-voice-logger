@@ -1,6 +1,6 @@
 # BG Voice Logger v0.7.2.1 — hotfix deployment and verification
 
-**Deployment update (operator report, 2026-11-24): v0.7.2.1 is now running in production.** The expected build is `WP 0.7.2.1 / JS 0.7.2.1-613947b7e695`. This chat update is not an independent HTTP/build or GAS verification. The following acceptance, backup and rollback steps remain applicable. GitHub PR #20 is still unmerged.
+**Deployment update (operator report, 2026-11-24): v0.7.2.1 is now running in production.** The expected build is `WP 0.7.2.1 / JS 0.7.2.1-613947b7e695`. This chat update is not an independent HTTP/build or GAS verification. The following acceptance, backup and rollback steps remain applicable. GitHub PR #20 was merged into `main` during source synchronization; that merge did not deploy code.
 
 **Starting point:** operator-reported production v0.7.2 (`WP 0.7.2 / JS 0.7.2-c6f4de4c832a`), Google Apps Script deployment Version 13. This branch contains the v0.7.2 source and #18 voice continuity fix. The exact deployed Apps Script source is not independently verified.
 
