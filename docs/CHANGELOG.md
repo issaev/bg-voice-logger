@@ -1,3 +1,13 @@
+## v0.8.0 mobile UX candidate (DRAFT — not deployed)
+
+- Direct camera capture is now available for existing LOG entries as well as new entries, using the existing private photo queue and guarded document/row identity.
+- Add new-entry preview thumbnails for newly captured/selected photos.
+- Exact header: „Документ за Координация на Акция“ in explicit readable red (#ff7474) on navy (#0f355b).
+- Preserve all valid Sheets files from the configured folder regardless of filename. Regression verifies existing GAS list/open logic, without backend edits.
+- Remove only the v0.2.2 import button; preserve legacy migration handler and IndexedDB records.
+- 25/35 isolated test files PASS vs 24/34 v0.7.2.1, same historical ten failing files; Android/iPhone and live Google acceptance pending.
+- [Mobile acceptance/rollback](PLAN_V080_UI_BG.md).
+
 ## v0.7.2.1 — Reliability & continuous voice LOG hotfix (operator-reported production 2026-11-24; acceptance pending)
 - #18: render each dictated LOG event continuously through audio/STT/review/pending/sending/synced/server echo with one stable op_id and no duplicate/flicker.
 - #17: distinct incident-list, document-read, sync and local persistence errors; a successful read cannot mask unrelated unsaved audio. Keep last confirmed data on read failure.
