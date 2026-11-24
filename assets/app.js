@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.2.2-fc03c6909e18';
+  const BVLOG_RUNNING_BUILD = '0.8.2.2-3b14139a1bdd';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -532,6 +532,7 @@
     // One active incident/identity only; never cache private data in HTTP or SW.
     const tabCacheRef=useRef(new Map());
     const prefetchOrder=['LOG','INFO','TECH','TEAM'];
+    const tabRefreshMs=120000;
     const [docLoadError,setDocLoadError]=useState('');
     const [lastFreshAt,setLastFreshAt]=useState('');
     const documentRequestRef=useRef(0);
@@ -980,10 +981,10 @@
         docRef.current?.id!==id||pageRef.current!==tab)return false;
       setData(entry.data);
       setCachedView(!entry.live||!!entry.dirty||!navigator.onLine||
-        Date.now()-Date.parse(entry.stamp||'')>=120000);
+        Date.now()-Date.parse(entry.stamp||'')>=tabRefreshMs);
       setLastFreshAt(entry.live?entry.stamp:'');
       setDocLoadError(entry.error||'');
-      viewRef.current={id,tab,hasData:true};return true;
+      viewRef.current={id,tab,hasData:true,stamp:entry.stamp};return true;
     }
     function invalidateTabs(id,tabs){
       if(id!==docRef.current?.id)return;
@@ -1021,7 +1022,11 @@
       setReadActivity(true);
       if(visible()){
         if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
-        paintTab(id,tab,currentTabEntry(id,tab));setDocLoading(true);setDocLoadError('');
+        if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+          paintTab(id,tab,currentTabEntry(id,tab));
+        setDocLoading(true);
+        // Keep a real error visible while retrying instead of flashing it off.
+        if(!viewRef.current.hasData)setDocLoadError('');
       }
       async function showCached(){
         if(currentTabEntry(id,tab)?.data)return true;
@@ -1052,11 +1057,11 @@
           throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
         if(!current())return;
         const stamp=new Date().toISOString();
-        const entry=rememberTab(id,tab,{data:r.data,stamp,live:true,dirty:false,error:'',retryAt:0});
+        const entry=rememberTab(id,tab,{data:r.data,stamp,live:true,dirty:false,error:'',retryAt:0,failures:0});
         if(visible()){
           // Do not replace an already visible edit target while a speculative
           // read is completing. Apply on the next safe refresh/tab visit.
-          if(!flight.background||!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+          if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
             paintTab(id,tab,entry);
           readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
         }
@@ -1067,13 +1072,15 @@
         if(!currentTabEntry(id,tab)?.data)await showCached();
         if(!current())return;
         const previous=currentTabEntry(id,tab);
-        const scheduled=visible()&&!flight.background&&scheduleReadRetry(id,e,automaticRetry);
+        const scheduled=visible()&&scheduleReadRetry(id,e,automaticRetry);
         const message='Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
           (previous?.data?' Показани са последните налични данни.':'')+
           (scheduled?' Автоматичен повторен опит е планиран.':'');
-        const entry=rememberTab(id,tab,{dirty:true,error:message,retryAt:Date.now()+120000});
+        const failures=(previous?.failures||0)+1;
+        const entry=rememberTab(id,tab,{dirty:true,error:message,failures,
+          retryAt:Date.now()+Math.min(900000,tabRefreshMs*Math.pow(2,Math.min(failures-1,3)))});
         if(visible()){
-          if(entry.data)paintTab(id,tab,entry);
+          if(entry.data&&(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false))paintTab(id,tab,entry);
           setDocLoadError(message);setCachedView(!!entry.data);
           const old=readBackoffRef.current,attempts=(old.id===id?old.attempts:0)+1;
           readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
@@ -1086,12 +1093,29 @@
       }
     }
     function nextPrefetchTab(id){
+      const now=Date.now();
+      const eligible=tab=>{
+        const entry=currentTabEntry(id,tab);
+        if(entry?.retryAt>now)return false;
+        // A scheduled foreground retry owns the active tab; other tabs may
+        // still refresh without repeatedly competing for that failed request.
+        const retry=readRetryRef.current;
+        return !(tab===pageRef.current&&retry.id===id&&!retry.exhausted);
+      };
+      // Finish warming all tabs before revisiting a warmed one.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&!currentTabEntry(id,tab)?.live)return tab;
+      // Priority order for subsequent refresh cycles, independent of the open tab.
       for(const tab of prefetchOrder){
         const entry=currentTabEntry(id,tab);
-        if((!entry?.live||entry.dirty)&&(!entry?.retryAt||Date.now()>=entry.retryAt))
-          return tab;
+        if(eligible(tab)&&entry&&(entry.dirty||now-Date.parse(entry.stamp||'')>=tabRefreshMs))return tab;
       }
       return '';
+    }
+    function applyDeferredTab(id){
+      const tab=pageRef.current,entry=currentTabEntry(id,tab);
+      if(entry?.data&&entry.live&&!entry.dirty&&viewRef.current.stamp!==entry.stamp&&
+        refreshRef.current?.safeToPaint!==false)paintTab(id,tab,entry);
     }
     async function startSession(chosen,bootstrap) {
       if(!chosen||!checkOperatorName())return;
@@ -1119,7 +1143,7 @@
       pageRef.current=tab;setPage(tab);resetView(id,tab);
       const entry=currentTabEntry(id,tab);
       const shown=paintTab(id,tab,entry);
-      const fresh=shown&&entry.live&&!entry.dirty&&navigator.onLine&&Date.now()-Date.parse(entry.stamp)<120000;
+      const fresh=shown&&entry.live&&!entry.dirty&&navigator.onLine&&Date.now()-Date.parse(entry.stamp)<tabRefreshMs;
       setDocLoading(false);
       // A warm tab renders without a new request. An uncached user choice
       // supersedes speculative work; an identical in-flight read is adopted.
@@ -1369,7 +1393,9 @@
               if(docRef.current&&o.doc_id===docRef.current.id){
                 touchedCurrent=true;
                 const affected=o.kind==='field'||o.kind==='add_row'?o.sheet:
-                  o.kind==='audio_upload'&&o.target_kind==='field'?o.field_sheet:'LOG';
+                  o.kind==='audio_upload'&&o.target_kind==='field'?o.field_sheet:
+                  ['log','log_change','photo','audio_upload'].includes(o.kind)?'LOG':'';
+                // Unknown operation types conservatively invalidate all tabs.
                 if(prefetchOrder.includes(affected))touchedTabs.add(affected);
                 else for(const tab of prefetchOrder)touchedTabs.add(tab);
                 // Invalidate at ACK, not just after the whole queue drains.
@@ -1410,9 +1436,10 @@
           o.state=work.state;
         }
         await refreshQueue();
-        // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
-        if(touchedCurrent && docRef.current && DB===scope&&touchedTabs.has(pageRef.current))
-          await loadDocument(docRef.current.id,false,undefined,true);
+        // Acknowledgments invalidate tabs. The background scheduler reads them
+        // after the write lease is released; no network read holds that lease.
+        if(touchedCurrent&&docRef.current&&DB===scope&&touchedTabs.has(pageRef.current))
+          setCachedView(true);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
@@ -1450,8 +1477,7 @@
         loadDocs();syncAll();processAudioQueue();
         const refresh=refreshRef.current;
         if(readRetryRef.current.id)scheduleReadRetryTimer();
-        else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
-          !documentReadInFlightRef.current)refresh.load(refresh.id);
+        if(refresh&&refresh.id===docRef.current?.id)invalidateTabs(refresh.id,prefetchOrder);
       }};
       const visibility=()=>{
         if(document.hidden){requestBackgroundSync();return;}
@@ -1463,7 +1489,7 @@
           const refresh=refreshRef.current;
           if(refresh&&refresh.id&&refresh.id===docRef.current?.id){
             invalidateTabs(refresh.id,prefetchOrder);
-            if(refresh.ready&&!documentReadInFlightRef.current)refresh.load(refresh.id);
+            // Let the same background scheduler refresh the invalidated tabs.
           }
         }
       };
@@ -1478,7 +1504,12 @@
     // A fresh guard snapshot prevents a 45s queue refresh from endlessly postponing polling.
     refreshRef.current={id:doc&&doc.id,
       safeToPaint:!recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving,
-      prefetch:nextPrefetchTab,ready:mode==='session'&&online&&!docLoading&&
+      prefetch:nextPrefetchTab,applyDeferred:applyDeferredTab,
+      backgroundReady:mode==='session'&&online&&!recording&&!fieldRecording&&!microphoneTest&&
+        !editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&['pending','sending','transcribing'].includes(o.state)&&
+          (!o.next_retry||Date.parse(o.next_retry)<=Date.now())),
+      ready:mode==='session'&&online&&!docLoading&&
       !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
       !unsavedAudio&&!draft.trim()&&!photos.length&&!queueOpen&&!gallery&&!logSaving&&
       !rowSaving&&!photoBusy&&
@@ -1487,26 +1518,19 @@
     useEffect(()=>{
       if(mode!=='session'||!doc||!online)return;
       const id=doc.id;
-      // Warm once per incident, then only dirty/missing tabs. Existing 2-minute
-      // active refresh remains separate; avoid four network reads on every tick.
+      // All tabs refresh independently, roughly every two minutes after their
+      // last successful response. A cheap timer schedules, not polls the server.
+      // At most one speculative read runs, and active interaction/writes win.
       const warm=()=>{
         const fresh=refreshRef.current;
         if(document.hidden||!navigator.onLine||syncingRef.current||
-          !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id||documentReadInFlightRef.current||
-          (readRetryRef.current.id===id&&!readRetryRef.current.exhausted))return;
+          !fresh||fresh.id!==id||!fresh.backgroundReady||docRef.current?.id!==id||documentReadInFlightRef.current)return;
+        fresh.applyDeferred(id);
         const tab=fresh.prefetch(id);
         if(tab)fresh.load(id,false,tab,false,true);
       };
-      const warmTimer=window.setInterval(warm,750);warm();
-      const timer=window.setInterval(()=>{
-        const fresh=refreshRef.current;
-        if(document.hidden||!navigator.onLine||syncingRef.current||
-           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id||
-           documentReadInFlightRef.current ||
-           (readBackoffRef.current.id===id && Date.now()<readBackoffRef.current.nextAt))return;
-        fresh.load(id);
-      },120000);
-      return()=>{window.clearInterval(timer);window.clearInterval(warmTimer);};
+      const warmTimer=window.setInterval(warm,1000);warm();
+      return()=>window.clearInterval(warmTimer);
     },[mode,doc&&doc.id,online]);
 
     function closeSession() { if(recording||fieldRecording)return;resetSessionReads();setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
@@ -2315,9 +2339,9 @@
           h('div',{className:'bv-banner error',role:'alert'},
             'Липсващи листове в Google Sheets: '+data.MISSING_TABS.join(', ')+
             '. Наличните раздели остават достъпни; не записвай в липсващ лист.'),
-        docLoadError&&!docLoading&&h('div',{className:'bv-load-error',role:'alert'},
+        docLoadError&&h('div',{className:'bv-load-error',role:'alert'},
           h('span',null,docLoadError),
-          h('button',{type:'button',onClick:()=>loadDocument(doc.id)},'Опитай отново')),
+          h('button',{type:'button',disabled:docLoading||!online,onClick:()=>loadDocument(doc.id)},'Опитай отново')),
         page==='LOG' ? h('section',{className:'bv-log-page'},
           h('div',{className:'bv-recorder'},
             h('div',{className:'bv-recorder-controls'},
