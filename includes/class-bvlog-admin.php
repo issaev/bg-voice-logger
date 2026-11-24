@@ -94,6 +94,9 @@ class BVLOG_Admin {
             UTC: <code><?php echo esc_html($trace['time_utc'] ?? ''); ?></code>;
             Detail: <code><?php echo esc_html($trace['detail'] ?? ''); ?></code>
           </p>
+          <?php if (!empty($trace['timings'])) : ?>
+            <p><code style="white-space:normal;overflow-wrap:anywhere"><?php echo esc_html(wp_json_encode($trace['timings'])); ?></code></p>
+          <?php endif; ?>
         </div>
         <?php endif; ?>
         <?php $recent_requests = (array)get_option('bvlog_bridge_request_history', array()); ?>
@@ -110,7 +113,10 @@ class BVLOG_Admin {
                 <td><?php echo esc_html($item['stage'] ?? ''); ?></td>
                 <td><?php echo esc_html((string)($item['elapsed_ms'] ?? '')); ?> ms</td>
                 <td><?php echo esc_html((string)($item['http_status'] ?? '')); ?></td>
-                <td><code><?php echo esc_html($item['detail'] ?? ''); ?></code></td></tr>
+                <td><code><?php echo esc_html($item['detail'] ?? ''); ?></code>
+                  <?php if (!empty($item['timings'])) : ?>
+                    <details><summary>Timing phases (ms)</summary><code style="white-space:normal;overflow-wrap:anywhere"><?php echo esc_html(wp_json_encode($item['timings'])); ?></code></details>
+                  <?php endif; ?></td></tr>
             <?php endforeach; ?>
             </tbody>
           </table>
@@ -131,7 +137,10 @@ class BVLOG_Admin {
                 <td><?php echo esc_html($item['stage'] ?? ''); ?></td>
                 <td><?php echo esc_html((string)($item['elapsed_ms'] ?? '')); ?> ms</td>
                 <td><?php echo esc_html((string)($item['http_status'] ?? '')); ?></td>
-                <td><code><?php echo esc_html($item['detail'] ?? ''); ?></code></td></tr>
+                <td><code><?php echo esc_html($item['detail'] ?? ''); ?></code>
+                  <?php if (!empty($item['timings'])) : ?>
+                    <details><summary>Timing phases (ms)</summary><code style="white-space:normal;overflow-wrap:anywhere"><?php echo esc_html(wp_json_encode($item['timings'])); ?></code></details>
+                  <?php endif; ?></td></tr>
               <?php endforeach; ?>
             </tbody>
           </table>

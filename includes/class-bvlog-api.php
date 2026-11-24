@@ -3,6 +3,27 @@ if (!defined('ABSPATH')) { exit; }
 
 class BVLOG_API {
     private static $bridge_request_id = '';
+    private static $bridge_timings = array();
+
+    /** Only bounded numeric timing data and fixed phase labels reach admin history. */
+    private static function accept_google_timings($diagnostics) {
+        if (!is_array($diagnostics) || ($diagnostics['request_id'] ?? '') !== self::$bridge_request_id) return;
+        $allowed=array('lock_wait','create_start','create_validated','create_reserved','create_copied',
+            'create_recovered','create_fields_set','create_prepared','create_flushed','create_published','create_confirmed','create_bootstrap',
+            'read_start','document_opened','sheet_handles_loaded','info_schema_loaded','info_loaded','log_end_scanned',
+            'log_values_loaded','log_richtext_loaded','log_loaded','photos_loaded','audio_index_loaded','history_loaded',
+            'log_assembled','team_tech_loaded','read_complete','list_start','list_files_loaded','list_types_loaded',
+            'operation_start','operation_complete','operation_doc_opened','operation_prepared','operation_deduplicated',
+            'operation_dedup_checked','operation_existing_row','operation_applied','operation_stamp_checked','operation_flushed');
+        $total=$diagnostics['gas_ms']??null;
+        if(is_int($total)&&$total>=0&&$total<=360000)self::$bridge_timings['gas_ms']=$total;
+        $phases=$diagnostics['phases_ms']??array();
+        if(!is_array($phases))return;
+        foreach($allowed as $phase){
+            $ms=$phases[$phase]??null;
+            if(is_int($ms)&&$ms>=0&&$ms<=360000)self::$bridge_timings['gas_phases_ms'][$phase]=$ms;
+        }
+    }
 
     /** Diagnostic classification only: do not log submitted text or Drive URLs. */
     private static function diagnostic_action($action, $payload) {
@@ -48,6 +69,9 @@ class BVLOG_API {
         )));
         register_rest_route('bvlog/v1', '/audio-view', array_merge($opts, array(
             'methods' => 'GET', 'callback' => array(__CLASS__, 'audio_view')
+        )));
+        register_rest_route('bvlog/v1', '/audio-stream', array_merge($opts, array(
+            'methods' => 'GET, HEAD', 'callback' => array(__CLASS__, 'audio_stream')
         )));
         register_rest_route('bvlog/v1', '/photo', array_merge($opts, array(
             'methods' => 'POST', 'callback' => array(__CLASS__, 'photo')
@@ -108,6 +132,7 @@ class BVLOG_API {
             'elapsed_ms' => (int)round((microtime(true) - $started) * 1000),
             'http_status' => (int)$http_status,
             'detail' => preg_replace('/[^A-Za-z0-9_.:-]/', '_', substr((string)$detail, 0, 100)),
+            'timings' => self::$bridge_timings,
         );
         update_option('bvlog_bridge_diagnostics', $snapshot, false);
         // Preserve terminal outcomes even when a later successful request replaces
@@ -136,6 +161,7 @@ class BVLOG_API {
     public static function forward($action, $payload = array()) {
         $started = microtime(true);
         self::$bridge_request_id = substr(str_replace('-', '', wp_generate_uuid4()), 0, 12);
+        self::$bridge_timings = array();
         $diag_action = self::diagnostic_action($action, $payload);
         $s = bvlog_settings();
         $secret = defined('BVLOG_SHARED_SECRET') ? BVLOG_SHARED_SECRET : get_option('bvlog_shared_secret', '');
@@ -157,11 +183,13 @@ class BVLOG_API {
             'payload' => $payload,
         );
         $image_read = ($diag_action === 'photo_read');
-        $max_response = $image_read ? 5 * 1024 * 1024 : 1024 * 1024;
+        $max_response = ($image_read || $diag_action === 'list') ? 5 * 1024 * 1024 : 1024 * 1024;
         // Explicit budgets protect normal journal writes from long hangs while
         // giving slower Google Drive media calls time to complete.
         $request_timeout = 15;
         $redirect_timeout = 12;
+        if ($diag_action === 'create') { $request_timeout = 45; $redirect_timeout = 15; }
+        if ($diag_action === 'operation') { $request_timeout = 30; $redirect_timeout = 15; }
         if ($diag_action === 'read') { $request_timeout = 35; $redirect_timeout = 15; }
         if ($diag_action === 'audio_read') { $request_timeout = 45; $redirect_timeout = 25; }
         elseif ($diag_action === 'photo_read') { $request_timeout = 35; $redirect_timeout = 25; }
@@ -171,6 +199,7 @@ class BVLOG_API {
         self::trace($diag_action, 'post_start', $started);
         // Google Apps Script ContentService returns a 302 to a one-time URL.
         // Handle that explicitly, using GET and WITHOUT forwarding credentials.
+        $post_started=microtime(true);
         $response = wp_remote_post($s['script_url'], array(
             'headers' => array('Content-Type' => 'application/json; charset=utf-8', 'Accept' => 'application/json'),
             'body' => wp_json_encode($body),
@@ -180,6 +209,7 @@ class BVLOG_API {
             'sslverify' => true,
             'limit_response_size' => $max_response,
         ));
+        self::$bridge_timings['post_ms']=(int)round((microtime(true)-$post_started)*1000);
         if (is_wp_error($response)) {
             self::trace($diag_action, 'post_transport_error', $started, 0, self::transport_hint($response, $request_timeout));
             return new WP_Error('bvlog_transport', 'Google POST failed: ' . $response->get_error_code() . '. See bridge diagnostics in WordPress settings.', array('status' => 424));
@@ -198,6 +228,7 @@ class BVLOG_API {
                 return new WP_Error('bvlog_google_redirect', 'Google returned an unexpected redirect target.', array('status' => 424));
             }
             self::trace($diag_action, 'get_start', $started, $status);
+            $get_started=microtime(true);
             $response = wp_safe_remote_get($location, array(
                 'headers' => array('Accept' => 'application/json'),
                 'timeout' => $redirect_timeout,
@@ -206,6 +237,7 @@ class BVLOG_API {
                 'sslverify' => true,
                 'limit_response_size' => $max_response,
             ));
+            self::$bridge_timings['redirect_ms']=(int)round((microtime(true)-$get_started)*1000);
             if (is_wp_error($response)) {
                 self::trace($diag_action, 'get_transport_error', $started, 0, self::transport_hint($response, $redirect_timeout));
                 return new WP_Error('bvlog_transport', 'Google redirect GET failed: ' . $response->get_error_code() . '. See bridge diagnostics in WordPress settings.', array('status' => 424));
@@ -224,6 +256,8 @@ class BVLOG_API {
             self::trace($diag_action, 'invalid_json', $started, $status, 'json_' . json_last_error());
             return new WP_Error('bvlog_invalid_json', 'Google response is not JSON. Check bridge diagnostics.', array('status' => 424));
         }
+        self::accept_google_timings($data['diagnostics']??null);
+        unset($data['diagnostics']); // Admin-only timing history, not browser API data.
         self::trace($diag_action, 'complete', $started, $status, isset($data['ok']) && !$data['ok'] ? 'google_rejected' : 'ok');
         if (isset($data['ok']) && !$data['ok']) {
             return rest_ensure_response(array(
@@ -251,10 +285,12 @@ class BVLOG_API {
         if (!$type || !$place || (function_exists('mb_strlen') ? mb_strlen($type) : strlen($type)) > 60 || (function_exists('mb_strlen') ? mb_strlen($place) : strlen($place)) > 100) {
             return new WP_Error('bvlog_invalid', 'Action type and location are required (max 60 / 100 characters).', array('status' => 400));
         }
-        return self::forward('create', array('type' => $type, 'place' => $place, 'incident_date' => $incident_date, 'create_id' => sanitize_text_field($p['create_id'] ?? '')));
+        return self::forward('create', array('type' => $type, 'place' => $place, 'incident_date' => $incident_date, 'create_id' => sanitize_text_field($p['create_id'] ?? ''), 'bootstrap' => ($p['bootstrap']??false)===true));
     }
     public static function document($request) {
-        return self::forward('read', array('doc_id' => sanitize_text_field($request['id'])));
+        $tab=strtoupper(sanitize_key((string)$request->get_param('tab')));
+        return self::forward('read', array('doc_id' => sanitize_text_field($request['id']),
+            'tab' => in_array($tab,array('LOG','INFO','TEAM','TECH'),true)?$tab:''));
     }
     private static function operation_author($payload) {
         $identity=BVLOG_Auth::identity();
@@ -269,6 +305,94 @@ class BVLOG_API {
         if (!preg_match('/^[A-Za-z0-9_-]{15,200}$/',$doc) || !preg_match('/^[a-f0-9-]{32,50}$/i',$id))
             return new WP_Error('bvlog_audio_ref','Invalid audio reference.',array('status'=>400));
         return self::forward('audio_read',array('doc_id'=>$doc,'audio_id'=>$id,'offset'=>$offset));
+    }
+    /**
+     * Authenticated same-origin native audio playback. A single bounded Range
+     * can be served without downloading the entire file to the browser.
+     * Every request goes through the existing authorization + folder checks.
+     */
+    public static function audio_stream($request) {
+        $doc = sanitize_text_field((string)$request->get_param('doc_id'));
+        $id = sanitize_text_field((string)$request->get_param('audio_id'));
+        if (!preg_match('/^[A-Za-z0-9_-]{15,200}$/D',$doc) || !preg_match('/^[a-f0-9-]{32,50}$/iD',$id))
+            return new WP_Error('bvlog_audio_ref','Invalid audio reference.',array('status'=>400));
+        $range = trim((string)$request->get_header('Range'));
+        $head = strtoupper($request->get_method()) === 'HEAD';
+        $limit = 524288; $max = 8 * 1024 * 1024;
+        $start = 0; $end = $limit - 1; $suffix = 0;
+        $base = array('doc_id'=>$doc,'audio_id'=>$id);
+        $headers = array('Cache-Control'=>'private, no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'=>'no-cache','Accept-Ranges'=>'bytes','X-Content-Type-Options'=>'nosniff',
+            'Cross-Origin-Resource-Policy'=>'same-origin','Referrer-Policy'=>'no-referrer');
+        if ($range !== '') {
+            if (!preg_match('/^bytes=([0-9]{0,9})-([0-9]{0,9})$/D',$range,$m) ||
+                ($m[1]==='' && $m[2]===''))
+                return new WP_Error('bvlog_audio_range','Invalid or multiple audio ranges.',array('status'=>416));
+            if ($m[1]==='') { $suffix=(int)$m[2]; if($suffix<1)return new WP_Error('bvlog_audio_range','Invalid suffix.',array('status'=>416)); }
+            else {
+                $start=(int)$m[1];
+                $end=$m[2]===''?$start+$limit-1:min((int)$m[2],$start+$limit-1);
+                if ($start>=$max || $end<$start)
+                    return new WP_Error('bvlog_audio_range','Range not satisfiable.',array('status'=>416));
+            }
+        }
+        $mime_types = array('audio/webm','audio/ogg','audio/mp4','audio/mpeg','audio/wav','audio/x-wav');
+        // Suffix/HEAD require authoritative total size; also works with old GAS
+        // which ignores meta_only and returns the first chunk.
+        if ($head || $suffix) {
+            $meta=self::forward('audio_read',array_merge($base,array('offset'=>0,'meta_only'=>true)));
+            if(is_wp_error($meta))return $meta;
+            $m=$meta->get_data();$size=(int)($m['size']??0);$mime=(string)($m['mime']??'');
+            if(empty($m['ok'])||$size<1||$size>$max||!in_array($mime,$mime_types,true))
+                return new WP_Error('bvlog_audio_missing','Audio unavailable.',array('status'=>404));
+            if($head)return new WP_REST_Response('',200,array_merge($headers,array('Content-Type'=>$mime,'Content-Length'=>(string)$size)));
+            $start=max(0,$size-$suffix);$end=min($size-1,$start+$limit-1);
+        }
+        $result=self::forward('audio_read',array_merge($base,array('offset'=>$start,'length'=>$end-$start+1)));
+        if(is_wp_error($result))return $result;
+        $data=$result->get_data();
+        if(empty($data['ok'])) {
+            // Obtain size only for an unsatisfiable range, not on each request.
+            if(($data['code']??'')==='audio_size' && $range!==''){
+                $meta=self::forward('audio_read',array_merge($base,array('offset'=>0,'meta_only'=>true)));
+                if(!is_wp_error($meta)){
+                    $m=$meta->get_data();$size=(int)($m['size']??0);
+                    if(!empty($m['ok'])&&$size>0&&$size<=$max&&$start>=$size)
+                        return new WP_REST_Response(null,416,array_merge($headers,array('Content-Range'=>'bytes */'.$size)));
+                }
+            }
+            return new WP_Error('bvlog_audio_missing','Audio unavailable.',array('status'=>404));
+        }
+        $size=(int)($data['size']??0);$next=(int)($data['next']??0);$mime=(string)($data['mime']??'');
+        $bytes=base64_decode((string)($data['base64']??''),true);
+        if($size<1||$size>$max||!in_array($mime,$mime_types,true)||!isset($data['offset'])||
+            (int)$data['offset']!==$start||$next<$start||$next>$size||$bytes===false||
+            strlen($bytes)!==$next-$start||strlen($bytes)>$limit)
+            return new WP_Error('bvlog_audio_invalid','Invalid audio response.',array('status'=>424));
+        if($start>=$size)
+            return new WP_REST_Response(null,416,array_merge($headers,array('Content-Range'=>'bytes */'.$size)));
+        $expected=min($end,$size-1)-$start+1;
+        // A legacy GAS response may contain more bytes than requested (e.g. iOS 0-1).
+        if(strlen($bytes)<$expected)return new WP_Error('bvlog_audio_invalid','Incomplete audio response.',array('status'=>424));
+        $bytes=substr($bytes,0,$expected);
+        $headers['Content-Type']=$mime;$headers['Content-Length']=(string)strlen($bytes);
+        if($range!==''){
+            $headers['Content-Range']='bytes '.$start.'-'.($start+strlen($bytes)-1).'/'.$size;
+            return new WP_REST_Response($bytes,206,$headers);
+        }
+        // No-Range clients can play small files directly; larger files use the
+        // existing full-download fallback rather than a misleading truncated 200.
+        if(strlen($bytes)!==$size)
+            return new WP_Error('bvlog_audio_range_required','Use Range or full audio download.',array('status'=>400));
+        return new WP_REST_Response($bytes,200,$headers);
+    }
+    public static function serve_audio_stream($served,$result,$request,$server) {
+        if($served || $request->get_route()!=='/bvlog/v1/audio-stream' ||
+            !in_array($result->get_status(),array(200,206),true))return $served;
+        $bytes=$result->get_data();
+        if(!is_string($bytes))return $served;
+        if(strtoupper($request->get_method())!=='HEAD')echo $bytes;
+        return true;
     }
     public static function audio($request) {
         $p=(array)$request->get_json_params();
@@ -287,7 +411,7 @@ class BVLOG_API {
             return new WP_Error('bvlog_audio_input','Invalid audio chunk.',array('status'=>400));
         return self::forward('operation',array('kind'=>'audio_part','doc_id'=>$id,'op_id'=>$op,
             'target_id'=>$target,'target_kind'=>sanitize_key($p['target_kind']),
-            'mime'=>$mime,'part_index'=>$part,'part_count'=>$count,'base64'=>$base64,
+            'mime'=>$mime,'part_index'=>$part,'part_count'=>$count,'base64'=>$base64,'sequential'=>($p['sequential']??false)===true,
             'field_sheet'=>strtoupper(sanitize_key($p['field_sheet']??'')),
             'field_row'=>absint($p['field_row']??0),
             'field_col'=>strtoupper(sanitize_key($p['field_col']??'')),

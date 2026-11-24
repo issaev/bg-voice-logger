@@ -13,9 +13,9 @@ const req={secret,action:'operation',request_id:'abcdef012345',payload:{text:'PR
 const out=context.doPost({postData:{contents:JSON.stringify(req)}});
 assert.equal(JSON.parse(out.value).ok,true);
 assert.equal(out.mime,'application/json');
-assert.equal(captured.length,2);
+assert.equal(captured.length,3);
 const logs=captured.map(JSON.parse);
-assert.deepEqual(logs.map(x=>x.stage),['received','completed']);
+assert.deepEqual(logs.map(x=>x.stage),['received','completed','response_serialized']);
 assert.ok(logs.every(x=>x.request_id==='abcdef012345'&&x.action==='operation'));
 const str=captured.join('\n');
 for(const value of [secret,req.payload.text,req.payload.doc_id])assert.ok(!str.includes(value),'Sensitive text leaked in log');

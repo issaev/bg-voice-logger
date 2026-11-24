@@ -14,5 +14,5 @@ assert.ok(output,'React root did not render');
 assert.equal(typeof output.type,'function');
 const tree=output.type();assert.equal(tree.type,'div');
 function flatten(node){if(!node)return '';if(typeof node==='string')return node;if(typeof node==='number')return String(node);if(Array.isArray(node))return node.map(flatten).join(' ');if(typeof node.type==='function')return flatten(node.type({...node.props,children:node.children}));return flatten(node.children);}
-const text=flatten(tree);assert.ok(text.includes('Документ за координация на акция'));assert.ok(text.includes('Избор на акция'),text);
+const text=flatten(tree);assert.ok(text.includes('Документ за Координация на Акция'));assert.ok(text.includes('Избор на акция'),text);
 console.log('PASS: React initial screen creates a Bulgarian session chooser without network access.');

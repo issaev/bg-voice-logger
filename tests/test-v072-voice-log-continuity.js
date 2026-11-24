@@ -8,7 +8,7 @@ function extract(start,end){
   assert.ok(i>=0&&j>i,'Missing '+start);
   return source.slice(i,j);
 }
-const pure=extract('  function journalEntries(queue,logs,docId,limit) {','  function EntryStatus({status}) {');
+const pure=extract('  function journalEntries(queue,logs,docId,limit) {','  function EntryStatus({status,retryAt}) {');
 const test={};vm.createContext(test);vm.runInContext(pure+'\nthis.project=journalEntries;this.isLog=isLocalJournalOp;',test);
 const op='stable-voice-uuid';
 const base={op_id:op,doc_id:'current',kind:'audio',state:'audio',event_at:'2026-11-24T10:11:13Z'};

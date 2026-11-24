@@ -8,7 +8,7 @@ const source=fs.readFileSync(path.join(root,'assets/app.js'),'utf8');
 const gas=fs.readFileSync(path.join(root,'apps-script/Code.gs'),'utf8');
 const php=fs.readFileSync(path.join(root,'includes/class-bvlog-api.php'),'utf8');
 const marker=source.match(/const BVLOG_RUNNING_BUILD = '([^']+)'/)[1];
-assert.match(marker,/^0\.7\.2\.1-[a-f0-9]{12}$/);
+assert.match(marker,/^0\.8\.2\.1-[a-f0-9]{12}$/);
 function extract(s,a,b){const x=s.indexOf(a),y=s.indexOf(b,x+a.length);assert(x>=0&&y>x,'Extraction failed: '+a);return s.slice(x,y);}
 function flatten(v,out=[]){if(v==null||typeof v==='string'||typeof v==='number'||typeof v==='boolean')return out;if(Array.isArray(v)){v.forEach(x=>flatten(x,out));return out;}if(typeof v.type==='function')return flatten(v.type({...v.props,children:v.children}),out);out.push(v);(v.children||[]).forEach(x=>flatten(x,out));return out;}
 function textOf(v){if(v==null||typeof v==='boolean')return '';if(Array.isArray(v))return v.map(textOf).join('');if(typeof v==='object')return textOf(v.children);return String(v);}
@@ -23,6 +23,7 @@ async function run(){
   const sctx={syncingRef:{current:false},navigator:{onLine:true},CFG:{auth_mode:'public'},authRef:{current:null},
     DB:'user0',database:async(method,store,arg)=>{if(method==='getAll')return items.map(x=>({...x}));if(method==='put'){let idx=items.findIndex(x=>x.op_id===arg.op_id);items[idx]={...arg};return arg;}throw Error(method);},
     refreshQueue:async()=>true,loadDocument:async id=>reads.push(id),docRef:{current:{id:'current'}},
+    uuid:()=> 'test-lease',syncLease:async()=>true,requestBackgroundSync:()=>{},
     api:async(path,method,payload)=>{ops.push({path,id:payload.op_id});return {ok:true};},
     window:{setTimeout:()=>{}},setError:()=>{},setSyncError:()=>{},B:x=>x,Date,Math,console};
   vm.createContext(sctx);vm.runInContext(syncSource+'\nthis.syncAll=syncAll;',sctx);
@@ -54,7 +55,7 @@ async function run(){
   const folder={getFilesByName:()=>({hasNext:()=>false})};
   const properties={getProperty:()=>null,setProperty:()=>{}};
   gctx.DriveApp={getFolderById:()=>folder,getFileById:()=>({makeCopy:(name)=>{
-    created++;createdName=name;return {getId:()=> 'NEW_DOC_ID',getUrl:()=> 'https://docs.google.com/test',setTrashed:()=>{}};
+    created++;createdName=name;return {getId:()=> 'NEW_DOC_ID',getUrl:()=> 'https://docs.google.com/test',getName:()=>createdName,setName:n=>{createdName=n;},getDateCreated:()=>new Date(),setTrashed:()=>{}};
   }})};
   gctx.SpreadsheetApp={openById:()=>ss,flush:()=>{}};
   gctx.PropertiesService={getScriptProperties:()=>properties};
@@ -69,9 +70,9 @@ async function run(){
   assert.equal(infoDate,'29.02.2024');assert.equal(logDate,'ДАТА: 29.02.2024');
   assert.equal(created,1);assert.equal(prepared,1);
   assert.ok(new Date(res.document.created).getTime()>Date.now()-60000,'creation time must be real, not backdated');
-  assert.throws(()=>gctx.bvlCreate_('FOLDER','TEMPLATE',{type:'Издирване',place:'Самоков',incident_date:'2026-02-30'}),/Invalid incident/);
+  assert.throws(()=>gctx.bvlCreate_('FOLDER','TEMPLATE',{type:'Издирване',place:'Самоков',incident_date:'2026-02-30',create_id:'12345678-1234-1234-1234-1234567890ac'}),/Invalid incident/);
   assert.equal(created,1,'bad date cannot create a spreadsheet');
-  const read=extract(gas,'function bvlRead_(folderId, templateId, docId, requestId) {','function bvlLogChange_');
+  const read=extract(gas,'function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {','function bvlLogChange_');
   assert.ok(!read.includes('bvlRepairPhotoAnchors_('),'periodic read must not mutate image positions');
 
   // Render a real App component with mocked React and transport: queue navigation, date preview and refresh timer.

@@ -59,11 +59,11 @@ check($GLOBALS['calls'][2]['redirects']===0,'Redirect GET should not follow new 
 check(count(get_option('bvlog_bridge_request_history'))===2,
   'The successful request must not erase the prior failure');
 check(get_option('bvlog_bridge_diagnostics')['stage']==='complete','Most recent snapshot must be success');
-// List and write POSTs retain their old 15s budget; no global increase.
+// LIST remains 15s; operation POST is deliberately 30s.
 $GLOBALS['networkQueue']=[okResponse()];BVLOG_API::forward('list');
 check(end($GLOBALS['calls'])['timeout']===15,'List timeout changed unexpectedly');
 $GLOBALS['networkQueue']=[okResponse()];BVLOG_API::forward('operation',['kind'=>'log','text'=>'SENSITIVE INCIDENT TEXT']);
-check(end($GLOBALS['calls'])['timeout']===15,'Operation write timeout changed unexpectedly');
+check(end($GLOBALS['calls'])['timeout']===30,'Operation write timeout must allow 30s');
 // Bound the history and check that no PII or secret was included.
 for($i=0;$i<36;$i++){$GLOBALS['networkQueue']=[failFast()];BVLOG_API::forward('read',['doc_id'=>'DOCUMENT0123456789012']);}
 $history=get_option('bvlog_bridge_request_history');
@@ -75,4 +75,4 @@ check(!str_contains($json,str_repeat('S',32)),'Shared secret leaked into history
 check(!str_contains($json,'PRIVATE'),'Google redirect credential leaked into history');
 check(str_contains(file_get_contents(__DIR__.'/../includes/class-bvlog-admin.php'),'bvlog_bridge_request_history'),
   'No WordPress admin UI for request history');
-echo "PASS v0.7.2.1 PHP bridge: read 35s, list/write 15s, 15s redirect, redacted capped history, safe correlation.\n";
+echo "PASS v0.7.2.1 PHP bridge: read 35s, list 15s/write 30s, 15s redirect, redacted capped history, safe correlation.\n";

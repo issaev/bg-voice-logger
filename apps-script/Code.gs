@@ -1,5 +1,5 @@
 /**
- * BG Voice Logger - Google Apps Script bridge v0.7.2.
+ * BG Voice Logger - Google Apps Script bridge v0.8.0 (draft).
  * Deploy as Web App: Execute as Me, access Anyone. HTTPS access is protected
  * by a long random shared secret kept only in WordPress and Script Properties.
  * Never put this secret into browser JavaScript or a public spreadsheet.
@@ -26,18 +26,42 @@ const BVL = {
 
 // Emit only a short random request identifier, a fixed action name, phase and
 // elapsed time. Never log payloads, document IDs, names, secrets or transcripts.
-function bvlTrace_(requestId, action, stage, started) {
+let bvlTraceBuffer_=null;
+function bvlTrace_(requestId, action, stage, started, phaseMs) {
   const rid=/^[a-f0-9]{12}$/.test(String(requestId||'')) ? String(requestId) : 'untracked';
   const act=['read','list','operation','create','audio_read','photo_read','ping'].includes(action)
     ? action : 'other';
-  try { console.log(JSON.stringify({request_id:rid,action:act,stage:stage,
-    elapsed_ms:Math.max(0,Date.now()-started)})); } catch(ignore) {}
+  const safeStage=/^[a-z0-9_]{1,48}$/.test(String(stage||'')) ? stage : 'untracked';
+  const report={request_id:rid,action:act,stage:safeStage,
+    elapsed_ms:Math.max(0,Date.now()-started)};
+  if(Number.isFinite(phaseMs) && phaseMs>=0)report.phase_ms=Math.floor(phaseMs);
+  if(bvlTraceBuffer_&&rid===bvlTraceBuffer_.request_id&&safeStage!=='untracked'){
+    const phases=bvlTraceBuffer_.phases_ms;
+    if(Object.keys(phases).length<40){
+      if(safeStage==='lock_acquired'||safeStage==='lock_busy')phases.lock_wait=Math.min(360000,report.elapsed_ms);
+      else if(Number.isFinite(report.phase_ms))phases[safeStage]=Math.min(360000,report.phase_ms);
+    }
+  }
+  try { console.log(JSON.stringify(report)); } catch(ignore) {}
+}
+
+// A phase represents the time spent since the previous marker, in addition to
+// cumulative elapsed time. Each tracer is local to one Apps Script execution.
+// Its stage names are fixed code literals; never attach user or sheet content.
+function bvlPhaseTracer_(requestId, action) {
+  const started=Date.now();
+  let previous=started;
+  return function(stage) {
+    const now=Date.now();
+    bvlTrace_(requestId,action,stage,started,Math.max(0,now-previous));
+    previous=now;
+  };
 }
 
 function doPost(e) {
   const start=Date.now();
   let traceId='', traceAction='other';
-
+  bvlTraceBuffer_=null;
   let result;
   try {
     const req = JSON.parse(e && e.postData && e.postData.contents || '{}');
@@ -48,6 +72,7 @@ function doPost(e) {
     if (!expected || expected.length < 24 || !req.secret || req.secret !== expected) {
       result = {ok: false, code: 'unauthorized', message: 'Invalid bridge credential.'};
     } else {
+      bvlTraceBuffer_={request_id:/^[a-f0-9]{12}$/.test(traceId)?traceId:'untracked',phases_ms:{}};
       result = bvlDispatch_(req);
     }
   } catch (err) {
@@ -55,7 +80,13 @@ function doPost(e) {
   } finally {
     bvlTrace_(traceId,traceAction,result&&result.ok===false?'completed_error':'completed',start);
   }
-  return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+  if(bvlTraceBuffer_&&result&&typeof result==='object'){
+    result.diagnostics={request_id:bvlTraceBuffer_.request_id,gas_ms:Math.min(360000,Math.max(0,Date.now()-start)),phases_ms:bvlTraceBuffer_.phases_ms};
+  }
+  bvlTraceBuffer_=null;
+  const json=JSON.stringify(result);
+  bvlTrace_(traceId,traceAction,'response_serialized',start);
+  return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
 function bvlDispatch_(request) {
@@ -68,19 +99,39 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.7.2'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.2'};
   }
-  if (action === 'list') return bvlList_(folderId, templateId);
-  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
+  if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
+  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id, payload.tab);
   if (action === 'photo_read') return bvlPhotoRead_(folderId, templateId, payload);
   if (action === 'audio_read') return bvlAudioRead_(folderId, templateId, payload);
   if (action === 'create' || action === 'operation') {
+    // The write lock is not involved in read operations. Log its wait
+    // separately to distinguish busy writes from slow Sheets/Drive calls.
+    const requestStart=Date.now();
+    bvlTrace_(request.request_id,action,'lock_wait_start',requestStart);
     const lock = LockService.getScriptLock();
-    if (!lock.tryLock(25000)) return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
+    if (!lock.tryLock(8000)) {
+      bvlTrace_(request.request_id,action,'lock_busy',requestStart);
+      return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
+    }
+    bvlTrace_(request.request_id,action,'lock_acquired',requestStart);
+    let result;
     try {
-      if (action === 'create') return bvlCreate_(folderId, templateId, payload);
-      return bvlOperation_(folderId, templateId, payload);
+      result=action==='create'?bvlCreate_(folderId,templateId,payload,request.request_id):
+        bvlOperation_(folderId,templateId,payload,request.request_id);
     } finally { lock.releaseLock(); }
+    // Optional real LOG bootstrap, outside the global write lock. A successful
+    // create must stay successful even if its initial read fails or is too large.
+    if(action==='create'&&result.ok&&payload.bootstrap===true&&!result.deduplicated&&Date.now()-requestStart<8000){
+      try{
+        const started=Date.now(),initial=bvlRead_(folderId,templateId,result.document.id,request.request_id,'LOG');
+        if(initial.ok&&JSON.stringify(initial.data).length<=180000)
+          result.bootstrap={id:initial.id,loaded_tabs:initial.loaded_tabs,data:initial.data};
+        bvlTrace_(request.request_id,'create','create_bootstrap',started,Date.now()-started);
+      }catch(ignore){ /* Client performs its ordinary LOG read. */ }
+    }
+    return result;
   }
   return {ok:false, code:'unsupported_action', message:'Unsupported bridge action.'};
 }
@@ -110,7 +161,7 @@ function bvlIncidentDate_(raw) {
     throw new Error('Invalid incident calendar day.');
   return {filename:match[1]+'.'+match[2]+'.'+match[3],display:match[3]+'.'+match[2]+'.'+match[1]};
 }
-function bvlDoc_(folderId, templateId, docId) {
+function bvlDoc_(folderId, templateId, docId, metadata) {
   if (!bvlValidId_(docId) || docId === templateId) throw new Error('Invalid operation document.');
   const file = DriveApp.getFileById(docId);
   if (file.getMimeType() !== BVL.MIME || file.isTrashed()) throw new Error('Not a live Google spreadsheet.');
@@ -118,20 +169,30 @@ function bvlDoc_(folderId, templateId, docId) {
   let inFolder = false;
   while (parents.hasNext()) if (parents.next().getId() === folderId) inFolder = true;
   if (!inFolder) throw new Error('This spreadsheet does not belong to the configured folder.');
+  // Reuse the already-authorized Drive handle instead of looking up the file
+  // again when a read needs its name. The optional argument is read-only output.
+  if(metadata)metadata.name=file.getName();
   return SpreadsheetApp.openById(docId);
 }
-function bvlList_(folderId, templateId) {
+function bvlList_(folderId, templateId, requestId) {
+  const phase=bvlPhaseTracer_(requestId,'list');
+  phase('list_start');
   const folder = DriveApp.getFolderById(folderId);
   const iter = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
   const files = [];
   while (iter.hasNext()) {
     const file = iter.next();
     if (file.getId() === templateId || file.isTrashed()) continue;
-    files.push({id:file.getId(), name:file.getName(), created:file.getDateCreated().toISOString(), url:file.getUrl()});
-    if (files.length >= 250) break;
+    const name=file.getName();
+    // A recoverable incomplete create is never shown as an operational incident.
+    if(/^BVLOG_CREATE_PENDING_[a-f0-9-]{32,50}$/i.test(name))continue;
+    files.push({id:file.getId(), name:name, created:file.getDateCreated().toISOString(), url:file.getUrl()});
   }
   files.sort((a,b) => b.created.localeCompare(a.created));
-  return {ok:true, documents:files, action_types:bvlTypeOptions_(templateId)};
+  phase('list_files_loaded');
+  const types=bvlTypeOptions_(templateId,true);
+  phase('list_types_loaded');
+  return {ok:true, documents:files, action_types:types};
 }
 /** Schema adapters. A spreadsheet copied from a template remains user-editable. */
 function bvlNorm_(text) {
@@ -148,11 +209,14 @@ function bvlCanonicalType_(text) {
   return bvlNorm_(value)===bvlNorm_('\u041d\u0430\u0432\u043e\u0434\u0435\u043d\u0438\u0435') ?
     '\u041d\u0430\u0432\u043e\u0434\u043d\u0435\u043d\u0438\u0435' : value;
 }
-function bvlInfoSections_(sheet) {
-  if(!sheet)return [];
-  const height=Math.min(Math.max(sheet.getLastRow(),45),750);
+function bvlInfoSections_(sheet,options) {
+  if(!sheet){if(options)options.legacy=[];return [];}
+  const lastRow=sheet.getLastRow();
+  const height=Math.min(Math.max(lastRow,45),750);
   const width=Math.min(Math.max(sheet.getLastColumn(),4),15);
   const grid=sheet.getRange(1,1,height,width).getDisplayValues();
+  // INFO legacy projection and adaptive schema use the same server read.
+  if(options)options.legacy=grid.slice(0,Math.min(Math.max(lastRow,34),150)).map(row=>row.slice(0,4));
   const sections=[];
   for(let i=0;i<grid.length;i++) {
     const row=grid[i];
@@ -193,7 +257,7 @@ function bvlInfoSections_(sheet) {
     }
   }
   // Read dropdown rules only for actual action-type rows; avoid large per-cell calls.
-  for(const section of sections)for(const row of section.rows){
+  if(!options||options.includeChoices!==false)for(const section of sections)for(const row of section.rows){
     if(bvlNorm_(row.label)!==bvlNorm_('\u0410\u043a\u0446\u0438\u044f'))continue;
     const f=row.fields[0];
     const rule=sheet.getRange(f.col+row.row).getDataValidation();
@@ -209,14 +273,29 @@ function bvlInfoSections_(sheet) {
   }
   return sections;
 }
-function bvlTypeOptions_(templateId) {
+function bvlTypeOptions_(templateId,useCache) {
+  // Only the chooser may use a short-lived versioned cache; CREATE and every
+  // actual field write always validate the current sheet's dropdown.
+  let cache=null,key='';
+  if(useCache)try{
+    const stamp=DriveApp.getFileById(templateId).getLastUpdated().getTime();
+    if(Number.isFinite(stamp)){
+      key='bvlog-type-v1:'+templateId+':'+stamp;
+      if(key.length<=240){cache=CacheService.getScriptCache();
+        const value=JSON.parse(cache.get(key)||'null');
+        if(Array.isArray(value)&&value.length&&value.every(x=>typeof x==='string'&&x.length<=60))return value;
+      }
+    }
+  }catch(ignore){cache=null;}
   const source=SpreadsheetApp.openById(templateId);
   const info=source.getSheetByName('INFO');
   const first=bvlInfoSections_(info)[0];
   const row=first&&first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f'));
   const menu=row&&row.fields[0]&&row.fields[0].choices || [];
   const placeholder=bvlNorm_('\u0418\u0437\u0431\u0435\u0440\u0438 \u043e\u0442 \u043c\u0435\u043d\u044e\u0442\u043e');
-  return menu.length ? menu.filter(x=>bvlNorm_(x)!==placeholder) : BVL.TYPES.map(bvlCanonicalType_);
+  const types=menu.length ? menu.filter(x=>bvlNorm_(x)!==placeholder) : BVL.TYPES.map(bvlCanonicalType_);
+  if(cache&&key)try{cache.put(key,JSON.stringify(types),60);}catch(ignore){}
+  return types;
 }
 function bvlValidationAwareSet_(range, value) {
   const target=bvlSafeText_(value,3000);
@@ -295,55 +374,105 @@ function bvlInfoAddRow_(ss,p) {
   return {ok:true,row:insertAt,role:role,section:section.section};
 }
 
-function bvlCreate_(folderId, templateId, payload) {
-  const folder = DriveApp.getFolderById(folderId);
-  const requestId = String(payload.create_id || '');
+// Only a prepared and flushed copy receives its final incident name.
+// Reservation is durable before makeCopy. An uncertain copy is never blindly repeated.
+function bvlCreateFile_(folderId,templateId,id){
+  if(!bvlValidId_(id)||id===templateId)throw new Error('Invalid created document.');
+  const file=DriveApp.getFileById(id);
+  if(file.isTrashed()||file.getMimeType()!==BVL.MIME||!bvlParentIs_(file,folderId))
+    throw new Error('Created document is no longer in the configured folder.');
+  return file;
+}
+function bvlCreateReply_(file,deduplicated){
+  return {ok:true,document:{id:file.getId(),name:file.getName(),created:file.getDateCreated().toISOString(),url:file.getUrl()},deduplicated:!!deduplicated};
+}
+function bvlUniqueName_(folder,base){
+  let name=base,suffix=2;
+  while(folder.getFilesByName(name).hasNext())name=base+' ('+(suffix++)+')';
+  return name;
+}
+function bvlCreate_(folderId, templateId, payload, traceId) {
+  const phase=bvlPhaseTracer_(traceId,'create');
+  phase('create_start');
+  const requestId=String(payload.create_id||'').toLowerCase();
+  if(!/^[a-f0-9-]{32,50}$/.test(requestId))return {ok:false,code:'create_id',message:'A stable creation identifier is required.'};
   const chosenDate=bvlIncidentDate_(payload.incident_date);
-  const idempotentKey = /^[a-f0-9-]{32,50}$/i.test(requestId) ? 'BVLOG_CREATE_' + requestId : '';
-  if (idempotentKey) {
-    const existing = PropertiesService.getScriptProperties().getProperty(idempotentKey);
-    if (existing) {
-      try {
-        const earlier = bvlDoc_(folderId,templateId,existing);
-        return {ok:true,document:{id:existing,name:DriveApp.getFileById(existing).getName(),url:earlier.getUrl()},deduplicated:true};
-      } catch(err) { /* Deleted file or moved folder; proceed with a new copy. */ }
+  const type=bvlSafeText_(payload.type,60),place=bvlSafeText_(payload.place,100);
+  if(!place||/[\r\n\\\/<>]/.test(place))return {ok:false,code:'place',message:'Location is required; avoid path separators.'};
+  const base=chosenDate.filename+' - '+BVL.DKA+' - '+bvlCanonicalType_(type)+' - '+place;
+  const key='BVLOG_CREATE_'+requestId,props=PropertiesService.getScriptProperties();
+  const existing=props.getProperty(key),folder=DriveApp.getFolderById(folderId);
+  let job=null,copy=null,wasExisting=!!existing;
+  if(existing){
+    // Legacy successful creates (including v0.8.0.1) store only the file ID.
+    if(bvlValidId_(existing)){
+      try{return bvlCreateReply_(bvlCreateFile_(folderId,templateId,existing),true);}
+      catch(ignore){return {ok:false,code:'create_missing',message:'Previously created document cannot be located. Ask an administrator; no new copy was made.'};}
     }
+    try{job=JSON.parse(existing);}catch(ignore){}
+    if(!job||job.v!==1||job.folder!==folderId||job.template!==templateId||job.base!==base||
+      job.temp!=='BVLOG_CREATE_PENDING_'+requestId||!['copying','prepared'].includes(job.phase))
+      return {ok:false,code:'create_conflict',message:'Creation request already exists with different or invalid parameters. No new copy was made.'};
+    if(job.id){
+      try{copy=bvlCreateFile_(folderId,templateId,job.id);}
+      catch(ignore){return {ok:false,code:'create_missing',message:'Pending copy is unavailable. Ask an administrator; no new copy was made.'};}
+    }else{
+      // A previous makeCopy may have committed despite a lost response.
+      const found=folder.getFilesByName(job.temp);
+      if(!found.hasNext())return {ok:false,code:'create_unknown',message:'Previous copy outcome is uncertain. Retry later or ask an administrator to inspect the reserved copy; no duplicate was created.'};
+      const candidate=found.next();
+      if(found.hasNext())return {ok:false,code:'create_unknown',message:'More than one pending copy exists. Administrator review required.'};
+      copy=bvlCreateFile_(folderId,templateId,candidate.getId());
+      job.id=copy.getId();props.setProperty(key,JSON.stringify(job));
+    }
+    phase('create_recovered');
+  }else{
+    if(!bvlTypeOptions_(templateId).includes(bvlCanonicalType_(type)))return {ok:false,code:'action_type',message:'Choose a valid action type from the current template.'};
+    phase('create_validated');
+    const temp='BVLOG_CREATE_PENDING_'+requestId;
+    // If the reservation was removed manually but a pending copy remains,
+    // fail closed instead of accidentally copying a second time.
+    if(folder.getFilesByName(temp).hasNext())return {ok:false,code:'create_unknown',message:'An existing pending copy needs administrator review.'};
+    job={v:1,folder:folderId,template:templateId,base:base,temp:temp,phase:'copying',id:''};
+    props.setProperty(key,JSON.stringify(job));
+    phase('create_reserved');
+    const template=DriveApp.getFileById(templateId);
+    copy=template.makeCopy(temp,folder);
+    job.id=copy.getId();props.setProperty(key,JSON.stringify(job));
+    phase('create_copied');
   }
-  const type = bvlSafeText_(payload.type, 60);
-  const place = bvlSafeText_(payload.place, 100);
-  if (!bvlTypeOptions_(templateId).includes(bvlCanonicalType_(type))) return {ok:false,code:'action_type',message:'Choose a valid action type from the current template.'};
-  if (!place || /[\r\n\\/<>]/.test(place)) return {ok:false,code:'place',message:'Location is required; avoid path separators.'};
-  const now = new Date();
-  const base = chosenDate.filename + ' - ' + BVL.DKA + ' - ' + bvlCanonicalType_(type) + ' - ' + place;
-  let name = base, suffix = 2;
-  while (folder.getFilesByName(name).hasNext()) { name = base + ' (' + suffix++ + ')'; }
-  const template = DriveApp.getFileById(templateId);
-  const copy = template.makeCopy(name, folder);
-  try {
-    const ss = SpreadsheetApp.openById(copy.getId());
-    const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
-    if (!info || !log || !ss.getSheetByName('TECH') || !ss.getSheetByName('TEAM')) {
+  if(job.phase==='copying'){
+    if(copy.getName()!==job.temp)return {ok:false,code:'create_unknown',message:'Pending copy was renamed before initialization. Administrator review required.'};
+    const ss=SpreadsheetApp.openById(copy.getId());
+    const info=ss.getSheetByName('INFO'),log=ss.getSheetByName('LOG');
+    if(!info||!log||!ss.getSheetByName('TECH')||!ss.getSheetByName('TEAM'))
       throw new Error('The template must contain INFO, LOG, TECH, TEAM tabs.');
-    }
-    const first=bvlInfoSections_(info)[0];
+    // The copied cell is validated below against its actual dropdown; no duplicate dropdown reads.
+    const first=bvlInfoSections_(info,{includeChoices:false})[0];
     const action=first&&first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f'));
     if(!action)throw new Error('Template INFO action type row is missing.');
-    const valueCell=info.getRange(action.fields[0].col+action.row);
-    const valid=bvlValidationAwareSet_(valueCell,bvlCanonicalType_(type));
+    const valid=bvlValidationAwareSet_(info.getRange(action.fields[0].col+action.row),bvlCanonicalType_(type));
     if(!valid.ok)throw new Error(valid.message);
-    // Location remains empty until an operator explicitly records actual GPS/location.
     const placeRow=first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u041b\u043e\u043a\u0430\u0446\u0438\u044f'));
     if(placeRow)info.getRange(placeRow.fields[0].col+placeRow.row).clearContent();
     info.getRange(Math.max(1,first.headerRow-1),Math.min(3,info.getMaxColumns())).setValue(chosenDate.display);
-    log.getRange('D2').setValue(BVL.DATE + ' ' + chosenDate.display);
+    log.getRange('D2').setValue(BVL.DATE+' '+chosenDate.display);
+    phase('create_fields_set');
     bvlPrepare_(ss);
+    phase('create_prepared');
     SpreadsheetApp.flush();
-    if (idempotentKey) PropertiesService.getScriptProperties().setProperty(idempotentKey,copy.getId());
-    return {ok:true, document:{id:copy.getId(),name:name,created:now.toISOString(),url:copy.getUrl()}};
-  } catch (err) {
-    try {copy.setTrashed(true);}catch(ignore){}
-    throw err;
+    phase('create_flushed');
+    job.phase='prepared';props.setProperty(key,JSON.stringify(job));
   }
+  // Once preparation is recorded, a lost rename or final-property ACK is recoverable.
+  // Never reinitialize a visible document or overwrite its manually edited cells.
+  if(copy.getName()===job.temp){
+    copy.setName(bvlUniqueName_(folder,base));
+    phase('create_published');
+  }
+  props.setProperty(key,copy.getId());
+  phase('create_confirmed');
+  return bvlCreateReply_(copy,wasExisting);
 }
 function bvlEnsureRows_(sheet, lastRowNeeded) {
   if (lastRowNeeded > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), lastRowNeeded - sheet.getMaxRows());
@@ -358,15 +487,20 @@ function bvlPrepare_(ss, needed) {
     const header=name==='LOG'?1:2;
     const technical=name==='LOG'?[['G','BVLOG_ID'],['H','BVLOG_STATUS']]:
       name==='TEAM'?[['I','BVLOG_ID']]:[['F','BVLOG_ID']];
-    for(const pair of technical){
-      const address=pair[0]+header;
-      const current=sh.getRange(address).getDisplayValue();
-      if(current&&current!==pair[1])throw new Error(name+' '+address+
+    const start=name==='LOG'?7:name==='TEAM'?9:6;
+    const range=sh.getRange(header,start,1,technical.length);
+    const existing=range.getDisplayValues()[0];
+    const formulas=typeof range.getFormulas==='function'?range.getFormulas()[0]:[];
+    for(let i=0;i<technical.length;i++){
+      const pair=technical[i],current=existing[i];
+      if((current&&current!==pair[1])||(!current&&formulas[i]))throw new Error(name+' '+pair[0]+header+
         ' is already in use. Refusing to overwrite manually added data.');
-      if(!current)sh.getRange(address).setValue(pair[1]);
     }
-    if(name==='LOG')sh.hideColumns(7,2);
-    else sh.hideColumns(name==='TEAM'?9:6);
+    // Fill only empty cells, retaining existing cell formatting and formulas.
+    if(existing.every(x=>!x))range.setValues([technical.map(pair=>pair[1])]);
+    else for(let i=0;i<technical.length;i++)if(!existing[i])sh.getRange(technical[i][0]+header).setValue(technical[i][1]);
+    const hidden=typeof sh.isColumnHiddenByUser==='function'&&technical.every((_,i)=>sh.isColumnHiddenByUser(start+i));
+    if(!hidden)sh.hideColumns(start,technical.length);
   }
   return bvlMeta_(ss);
 }
@@ -393,25 +527,44 @@ function bvlFindId_(sheet, idCol, fromRow, opId) {
 function bvlStamp_(meta, p, result) {
   meta.appendRow([p.op_id, p.kind, new Date().toISOString(), p.author || '', JSON.stringify(result).slice(0,1000)]);
 }
+// Find the last nonempty operational row without fetching the entire history.
+// The reference implementation scanned all rows from firstRow to getLastRow().
+// Work backwards in bounded chunks, preserving the same result even when
+// trailing rows contain values in columns outside the operational range.
 function bvlEnd_(sheet, firstRow, firstCol, columnCount) {
-  const last = sheet.getLastRow();
-  if (last < firstRow) return firstRow - 1;
-  const range = sheet.getRange(firstRow,firstCol,last-firstRow+1,columnCount).getDisplayValues();
-  let end = firstRow - 1;
-  for (let i=0;i<range.length;i++) {
-    if (range[i].some(v => String(v).trim() !== '')) end = firstRow + i;
+  const last=sheet.getLastRow();
+  if(last<firstRow)return firstRow-1;
+  let batch=256;
+  for(let end=last;end>=firstRow;){
+    const start=Math.max(firstRow,end-batch+1);
+    const rows=sheet.getRange(start,firstCol,end-start+1,columnCount).getDisplayValues();
+    for(let i=rows.length-1;i>=0;i--){
+      if(rows[i].some(v=>String(v).trim()!==''))return start+i;
+    }
+    end=start-1;
+    // Sparse trailing metadata can produce a very long empty tail. Increase
+    // the block size gradually, capped at 4096 rows per request.
+    batch=Math.min(4096,batch*2);
   }
-  return end;
+  return firstRow-1;
 }
-function bvlOperation_(folderId, templateId, payload) {
+function bvlOperation_(folderId, templateId, payload, requestId) {
+  const phase=bvlPhaseTracer_(requestId,'operation');
+  phase('operation_start');
   const docId = bvlValidId_(payload.doc_id);
   const opId = String(payload.op_id || '');
   if (!/^[a-f0-9-]{32,50}$/i.test(opId)) return {ok:false,code:'bad_id',message:'Invalid operation ID.'};
   const ss = bvlDoc_(folderId, templateId, docId);
+  phase('operation_doc_opened');
   const needed=payload.kind==='field'||payload.kind==='add_row' ? String(payload.sheet||'') :
     payload.kind==='audio_part'&&payload.target_kind==='field' ? String(payload.field_sheet||'') : 'LOG';
   const meta = bvlPrepare_(ss,needed);
-  if (bvlDone_(meta, opId)) return {ok:true,deduplicated:true,complete:payload.kind==='audio_part'};
+  phase('operation_prepared');
+  if (bvlDone_(meta, opId)) {
+    phase('operation_deduplicated');
+    return {ok:true,deduplicated:true,complete:payload.kind==='audio_part'};
+  }
+  phase('operation_dedup_checked');
   let existingRow = 0;
   if (payload.kind === 'log') existingRow = bvlFindId_(ss.getSheetByName('LOG'), 7, 3, opId);
   if (payload.kind === 'add_row' && payload.sheet === 'TEAM') existingRow = bvlFindId_(ss.getSheetByName('TEAM'), 9, 3, opId);
@@ -419,6 +572,7 @@ function bvlOperation_(folderId, templateId, payload) {
   if (existingRow) {
     const dedup = {ok:true,deduplicated:true,row:existingRow};
     bvlStamp_(meta,payload,dedup);
+    phase('operation_existing_row');
     return dedup;
   }
   let result;
@@ -429,8 +583,11 @@ function bvlOperation_(folderId, templateId, payload) {
   else if (payload.kind === 'audio_part') result = bvlAudioPart_(folderId,ss,payload);
   else if (payload.kind === 'log_change') result = bvlLogChange_(ss,payload);
   else return {ok:false,code:'kind',message:'Unsupported operation type.'};
+  phase('operation_applied');
   if (result.ok && (payload.kind !== 'audio_part' || result.complete)) bvlStamp_(meta, payload, result);
+  phase('operation_stamp_checked');
   SpreadsheetApp.flush();
+  phase('operation_flushed');
   return result;
 }
 function bvlLog_(ss, p) {
@@ -521,48 +678,100 @@ function bvlAddRow_(ss, p) {
   sheet.getRange(next,1,1,count+2).setValues([[next-2].concat(entries,[String(p.op_id)])]);
   return {ok:true,row:next};
 }
-function bvlRead_(folderId, templateId, docId, requestId) {
-  const traceStart=Date.now();
-  const phase=name=>bvlTrace_(requestId,'read',name,traceStart);
+// For a sparse active tab, find exact index keys first and fetch only a few
+// contiguous blocks. Fall back to the old full range for dense or unsupported
+// searches. Never use a cached media mapping or discard a matching history row.
+function bvlIndexedRows_(sheet,width,keyColumn,keys){
+  if(!sheet)return [];
+  const last=sheet.getLastRow();
+  if(last<2)return [];
+  const all=()=>sheet.getRange(2,1,last-1,width).getDisplayValues();
+  if(!keys)return all();
+  const values=Array.from(keys);
+  if(!values.length)return [];
+  if(last<=257||values.length>120)return all();
+  // Exact identifiers only; irregular manually entered IDs use the full scan.
+  if(values.some(x=>!/^[A-Za-z0-9_-]{1,200}$/.test(x)))return all();
+  const pattern='^('+values.join('|')+')$';
+  if(pattern.length>12000)return all();
+  try{
+    const matches=sheet.getRange(2,keyColumn,last-1,1).createTextFinder(pattern)
+      .useRegularExpression(true).matchEntireCell(true).matchCase(true).findAll();
+    const rows=Array.from(new Set(matches.map(x=>x.getRow()))).sort((a,b)=>a-b);
+    if(!rows.length)return [];
+    const runs=[];
+    for(const row of rows){
+      if(row<2||row>last)return all();
+      const prev=runs[runs.length-1];
+      if(prev&&row<=prev.end+2)prev.end=row;
+      else runs.push({start:row,end:row});
+      if(runs.length>8)return all();
+    }
+    const size=runs.reduce((n,x)=>n+x.end-x.start+1,0);
+    if(size>(last-1)*0.5)return all();
+    const wanted=new Set(values),out=[];
+    for(const run of runs){
+      const part=sheet.getRange(run.start,1,run.end-run.start+1,width).getDisplayValues();
+      for(const record of part)if(wanted.has(String(record[keyColumn-1]||'')))out.push(record);
+    }
+    return out;
+  }catch(ignore){return all();}
+}
+function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
+  const tabs=['LOG','INFO','TEAM','TECH'];
+  const tab=tabs.includes(requestedTab)?requestedTab:'';
+  const want=name=>!tab||tab===name;
+  const phase=bvlPhaseTracer_(requestId,'read');
   phase('read_start');
-  const ss = bvlDoc_(folderId,templateId,docId);
+  const metadata={};
+  const ss = bvlDoc_(folderId,templateId,docId,metadata);
   phase('document_opened');
   const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
   const team = ss.getSheetByName('TEAM'), tech = ss.getSheetByName('TECH');
   const data = {};
-  data.MISSING_TABS=['INFO','LOG','TEAM','TECH'].filter(name=>!ss.getSheetByName(name));
-  const infoSections=bvlInfoSections_(info);
-  data.INFO_SECTIONS=infoSections;
-  data.INFO=info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[];
-  phase('info_loaded');
+  // Reuse these handles: getSheetByName for each tab has already been called.
+  data.MISSING_TABS=['INFO','LOG','TEAM','TECH'].filter((name,i)=>![info,log,team,tech][i]);
+  phase('sheet_handles_loaded');
+  if(want('INFO')){
+    const projection={};
+    data.INFO_SECTIONS=bvlInfoSections_(info,projection);
+    phase('info_schema_loaded');
+    // Legacy test/adapter fallback; production uses the same schema grid.
+    data.INFO=projection.legacy||(info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[]);
+    phase('info_loaded');
+  }
   let logStart=2,lr=[],photoRich=[];
-  if(log){
+  if(want('LOG')&&log){
     const logEnd=bvlEnd_(log,2,2,6);
+    phase('log_end_scanned');
     logStart=Math.max(2,logEnd-119);
     lr=log.getRange(logStart,1,Math.max(1,logEnd-logStart+1),8).getDisplayValues();
+    phase('log_values_loaded');
     // Reads must not change image anchors; any maintenance needs its own explicit write operation.
     photoRich=log.getRange(logStart,6,Math.max(1,logEnd-logStart+1),1).getRichTextValues();
+    phase('log_richtext_loaded');
   }
   phase('log_loaded');
   const byLogId = {};
-  const gallery = ss.getSheetByName(BVL.PHOTOS);
-  if (gallery && gallery.getLastRow() >= 2) {
-    const stored = gallery.getRange(2,1,gallery.getLastRow()-1,10).getDisplayValues();
+  const visibleIds=new Set(lr.map(v=>String(v[6]||'')).filter(Boolean));
+  const gallery = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.PHOTOS):null;
+  if (gallery) {
+    const stored = bvlIndexedRows_(gallery,10,2,tab?visibleIds:null);
     stored.forEach(record => {
       const logId = String(record[1] || '');
       const mediaId = String(record[0] || '');
-      if (!logId || !mediaId) return;
+      if (!logId || !mediaId || (tab&&!visibleIds.has(logId))) return;
       if (!byLogId[logId]) byLogId[logId] = [];
       byLogId[logId].push({id:mediaId, text:record[5] || 'Снимка', url:'', managed:true});
     });
   }
   phase('photos_loaded');
   const byAudio = {}, byFieldAudio = {};
-  const audioIndex = ss.getSheetByName(BVL.AUDIOS);
-  if (audioIndex && audioIndex.getLastRow() >= 2) {
-    audioIndex.getRange(2,1,audioIndex.getLastRow()-1,12).getDisplayValues().forEach(r => {
-      if(r[2] === 'log' && r[1] && r[0])byAudio[String(r[1])] = {id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)};
-      if(r[2] === 'field' && r[9] && r[10] && r[11]){
+  const audioIndex = (!tab||tab!=='LOG'||visibleIds.size)?ss.getSheetByName(BVL.AUDIOS):null;
+  if (audioIndex) {
+    bvlIndexedRows_(audioIndex,12,tab&&tab!=='LOG'?10:2,tab?(tab==='LOG'?visibleIds:new Set([tab])):null).forEach(r => {
+      if(want('LOG')&&r[2] === 'log' && r[1] && r[0]&&(!tab||visibleIds.has(String(r[1]))))byAudio[String(r[1])] = {id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)};
+      if(r[2] === 'field' && r[9] && r[10] && r[11]&&(!tab||String(r[9])===tab)){
         const fieldKey=String(r[9])+':'+String(r[11])+String(r[10]);
         if (!byFieldAudio[fieldKey]) byFieldAudio[fieldKey] = [];
         byFieldAudio[fieldKey].push({id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)});
@@ -572,17 +781,18 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   data.FIELD_AUDIO=byFieldAudio;
   phase('audio_index_loaded');
   const byHistory = {};
-  const audit = ss.getSheetByName(BVL.HISTORY);
-  if (audit && audit.getLastRow() >= 2) {
-    audit.getRange(2,1,audit.getLastRow()-1,8).getDisplayValues().forEach(r => {
+  const audit = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.HISTORY):null;
+  if (audit) {
+    bvlIndexedRows_(audit,8,2,tab?visibleIds:null).forEach(r => {
       const key = String(r[1]||'');
-      if (!key) return;
+      if (!key || (tab&&!visibleIds.has(key))) return;
       if (!byHistory[key]) byHistory[key] = [];
       byHistory[key].push({at:String(r[3]||''),author:String(r[4]||''),action:String(r[2]||''),before:String(r[5]||''),after:String(r[6]||'')});
+      if(byHistory[key].length>8)byHistory[key].shift();
     });
   }
   phase('history_loaded');
-  data.LOG = lr.map((v,i) => {
+  if(want('LOG'))data.LOG = lr.map((v,i) => {
     // Old v0.4.x hyperlinks continue to display without making files public.
     const legacy = photoRich[i] && photoRich[i][0] ? photoRich[i][0].getRuns()
       .filter(run => run.getLinkUrl() && /^https:\/\/drive\.google\.com\//.test(run.getLinkUrl()))
@@ -591,7 +801,9 @@ function bvlRead_(folderId, templateId, docId, requestId) {
       audio:byAudio[String(v[6]||'')]||null, history:(byHistory[String(v[6]||'')]||[]).slice(-8),
       photos:(byLogId[String(v[6] || '')] || []).concat(legacy)};
   }).filter(x => x.cells.slice(1,7).some(Boolean));
+  phase('log_assembled');
   for (const name of ['TEAM','TECH']) {
+    if(!want(name))continue;
     const sheet=name==='TEAM'?team:tech;
     if(!sheet){data[name]=[];continue;}
     const end=bvlEnd_(sheet,3,2,name==='TEAM'?8:5);
@@ -604,7 +816,8 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   }
 
   phase('team_tech_loaded');
-  const result={ok:true,id:docId,name:DriveApp.getFileById(docId).getName(),url:ss.getUrl(),data:data};
+  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data};
+  if(tab)result.loaded_tabs=[tab];
   phase('read_complete');
   return result;
 }
@@ -695,14 +908,21 @@ function bvlAudioPart_(rootId,ss,p){
   const folder=bvlAudioFolder_(rootId,ss),name=opId+'.part.'+String(number).padStart(3,'0');
   const existing=folder.getFilesByName(name);
   if(!existing.hasNext())folder.createFile(Utilities.newBlob(bytes,'application/octet-stream',name));
+  if(p.sequential===true&&number<count-1)return {ok:true,complete:false,part_index:number};
   const all=[];let size=0;
   for(let i=0;i<count;i++){
     const partName=opId+'.part.'+String(i).padStart(3,'0'),parts=folder.getFilesByName(partName);
-    if(!parts.hasNext())return {ok:true,complete:false,part_index:number};
-    const part=parts.next(),segment=part.getBlob().getBytes();all.push({file:part,bytes:segment});size+=segment.length;
-    if(size>8*1024*1024)return {ok:false,code:'audio_size',message:'Audio is over 8 MB.'};
+    if(!parts.hasNext())return {ok:true,complete:false,part_index:number,next_part:i};
+    // Check existence first. Do not reread already uploaded bytes on every part.
+    all.push({file:parts.next()});
   }
-  const content=[];all.forEach(p=>p.bytes.forEach(b=>content.push(b)));
+  const content=[];
+  for(const part of all){
+    const segment=part.file.getBlob().getBytes();
+    size+=segment.length;
+    if(size>8*1024*1024)return {ok:false,code:'audio_size',message:'Audio is over 8 MB.'};
+    segment.forEach(b=>content.push(b));
+  }
   const ext=({'audio/webm':'.webm','audio/ogg':'.ogg','audio/mp4':'.m4a','audio/mpeg':'.mp3','audio/wav':'.wav','audio/x-wav':'.wav'})[mime];
   const finalName=opId+ext,found=folder.getFilesByName(finalName);
   const saved=found.hasNext()?found.next():folder.createFile(Utilities.newBlob(content,mime,finalName));
@@ -722,13 +942,45 @@ function bvlAudioRead_(rootId,templateId,p){
   const dir=DriveApp.getFolderById(bvlValidId_(record[6]));
   if(f.isTrashed()||dir.isTrashed()||!bvlParentIs_(f,dir.getId())||!bvlParentIs_(dir,rootId))
     return {ok:false,code:'audio_missing',message:'Audio file was moved.'};
-  const bytes=f.getBlob().getBytes(),total=bytes.length;
-  if(total>8*1024*1024||offset>total)return {ok:false,code:'audio_size',message:'Audio exceeds supported read limit.'};
-  // 512 KiB per response: 16 requests for 8 MiB rather than 43.
-  // Base64 stays below WordPress' 1 MiB response limit.
-  const slice=bytes.slice(offset,Math.min(total,offset+524288));
+  const total=Number(f.getSize());
+  if(!Number.isInteger(total)||total<1||total>8*1024*1024||offset>total)
+    return {ok:false,code:'audio_size',message:'Audio exceeds supported read limit.'};
+  const mime=String(record[4]);
+  if(!['audio/webm','audio/ogg','audio/mp4','audio/mpeg','audio/wav','audio/x-wav'].includes(mime))
+    return {ok:false,code:'audio_format',message:'Unsupported audio format.'};
+  if(p.meta_only===true)return {ok:true,mime:mime,size:total,audio_id:audioId};
+  const requested=p.length==null?524288:Number(p.length);
+  if(!Number.isInteger(requested)||requested<1||requested>524288)
+    return {ok:false,code:'audio_size',message:'Invalid audio range length.'};
+  const end=Math.min(total,offset+requested);
+  const slice=end===offset?[]:bvlDriveAudioRange_(f,offset,end,total);
+  if(slice.length!==end-offset)return {ok:false,code:'audio_size',message:'Audio changed during read.'};
   return {ok:true,mime:String(record[4]),size:total,offset:offset,next:offset+slice.length,
     base64:Utilities.base64Encode(slice),audio_id:audioId};
+}
+
+/** Private Drive range. Never return an OAuth token, URL, or Drive ID to clients.
+ * A legacy full-blob fallback preserves playback if the Drive API is disabled.
+ * Strictly validate Content-Range and byte count before returning a partial response.
+ */
+function bvlDriveAudioRange_(file,start,end,total){
+  try {
+    const response=UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(file.getId())+'?alt=media&supportsAllDrives=true',{
+      headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken(),Range:'bytes='+start+'-'+(end-1),'Accept-Encoding':'identity'},
+      muteHttpExceptions:true,followRedirects:false
+    });
+    const status=response.getResponseCode();
+    const bytes=response.getContent();
+    if(status===206){
+      const headers=response.getAllHeaders();
+      const key=Object.keys(headers).find(k=>k.toLowerCase()==='content-range');
+      if(key&&String(headers[key])==='bytes '+start+'-'+(end-1)+'/'+total&&bytes.length===end-start)return bytes;
+    }
+    if(status===200&&bytes.length===total)return bytes.slice(start,end);
+  }catch(ignore){/* Compatibility fallback, without exposing provider credentials. */}
+  const bytes=file.getBlob().getBytes();
+  if(bytes.length!==total)return [];
+  return bytes.slice(start,end);
 }
 
 /** Keep private thumbnails attached to their LOG ID after row sorting/movement. */
@@ -808,9 +1060,10 @@ function bvlPhotoFolder_(folderId, ss) {
   props.setProperty(propKey, result.getId());
   return result;
 }
-function bvlSaveImage_(folder, filename, blob) {
+function bvlSaveImage_(folder, filename, blob, status) {
   const current = folder.getFilesByName(filename);
-  return current.hasNext() ? current.next() : folder.createFile(blob);
+  if(current.hasNext()){if(status)status.created=false;return current.next();}
+  const file=folder.createFile(blob);if(status)status.created=true;return file;
 }
 function bvlInlineThumbnail_(log, row, blob, photoOpId) {
   // Blob-based overlay images are supported for private Drive files. Public IMAGE()
@@ -873,9 +1126,10 @@ function bvlAttachPhoto_(folderId, ss, p) {
   const ext = mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg';
   const name = opId + ext;
   const original = bvlSaveImage_(photoFolder,name,Utilities.newBlob(data,mime,name));
-  const preview = bvlSaveImage_(photoFolder,opId+'-preview.jpg',thumbBlob);
-  // Do not overwrite legacy linked photo cells; new photos remain fully indexed.
-  bvlInlineThumbnail_(log,row,preview.getBlob(),opId);
+  const previewStatus={};
+  const preview = bvlSaveImage_(photoFolder,opId+'-preview.jpg',thumbBlob,previewStatus);
+  // Use exactly the bytes just saved; on retry use the already persisted file.
+  bvlInlineThumbnail_(log,row,previewStatus.created?thumbBlob:preview.getBlob(),opId);
   if (!log.getRange(row,7).getDisplayValue()) log.getRange(row,7).setValue(logId);
   const cell = log.getRange(row,6);
   if (!cell.getDisplayValue()) cell.setValue('📷');

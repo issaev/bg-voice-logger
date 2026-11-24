@@ -182,7 +182,7 @@
   padding:7px 10px;cursor:pointer;display:inline-flex;align-items:center;gap:5px}
 #bvlog-root .bv-event-actions button.danger{color:#9a2632;border-color:#ebbac0}
 #bvlog-root .bv-event-cancelled{background:#f7f7f7;opacity:.8}
-#bvlog-root .bv-event-cancelled .bv-event-body>strong{text-decoration:line-through;color:#667582}
+#bvlog-root .bv-event-cancelled .bv-event-main>strong{text-decoration:line-through;color:#667582}
 #bvlog-root .bv-event-history button{background:transparent;border:0;cursor:pointer;color:#235b84;font-size:11px;text-decoration:underline;padding:5px 0}
 #bvlog-root .bv-event-history small{display:block;font-size:11px;border-top:1px solid #dce9f2;padding:5px 0;overflow-wrap:anywhere}
 #bvlog-root .bv-audio-review{display:grid;gap:8px}
@@ -288,3 +288,49 @@
 #bvlog-root .bv-inline-voice-review{display:grid;gap:8px;max-width:min(100%,580px);margin-top:9px;}
 #bvlog-root .bv-inline-voice-review .bv-textarea{width:100%;min-height:70px;box-sizing:border-box;}
 #bvlog-root .bv-inline-voice-review .bv-btn{justify-self:start;}
+
+/* v0.8.0 UX draft: explicit readable red title; contrast 4.76:1 on #0f355b. */
+#bvlog-root .bv-header .bv-brand .bv-brand-title { color:#ff7474 !important; }
+#bvlog-root .bv-photo-chip-preview {width:52px;height:52px;object-fit:cover;border-radius:7px;flex-shrink:0;}
+#bvlog-root .bv-attach-camera {background:#eef7ff;border-color:#83b7d9;}
+#bvlog-root .bv-doc-folder-hint {display:block;color:#5a7286;font-size:12px;line-height:1.4;margin:5px 0 10px;}
+#bvlog-root .bv-photo-tools input:disabled, #bvlog-root .bv-attach-inline input:disabled {pointer-events:none;}
+
+/* v0.8.0 PWA installation: accessible, mobile-first action in the incident chooser. */
+#bvlog-root .bv-install-card {display:grid;gap:10px;background:#eff7ff;border-color:#b4d3ed;}
+#bvlog-root .bv-install-btn {min-height:48px;display:flex;align-items:center;justify-content:center;gap:9px;width:100%;background:#0f355b;color:white;border:1px solid #0f355b;border-radius:11px;font:inherit;font-weight:750;cursor:pointer;padding:12px 16px;text-align:center;}
+#bvlog-root .bv-install-btn:focus-visible,#bvlog-root .bv-install-help-close:focus-visible {outline:3px solid #f6a43b;outline-offset:2px;}
+#bvlog-root .bv-install-caption,#bvlog-root .bv-install-status {font-size:13px;color:#315472;margin:0;}
+#bvlog-root .bv-install-help {display:grid;gap:10px;background:#fff;border:1px solid #b4d3ed;border-radius:10px;padding:12px;color:#203c58;font-size:13px;}
+#bvlog-root .bv-install-help p {margin:0;line-height:1.55;}
+#bvlog-root .bv-install-help-close {min-height:40px;padding:8px 12px;justify-self:start;border:1px solid #9bb8d1;border-radius:8px;background:white;color:#164771;font-weight:700;cursor:pointer;}
+@media(max-width:360px){#bvlog-root .bv-install-btn{font-size:13px;padding:11px 9px;}}
+
+/* v0.8.1: compact install icon, photo source choice, and mobile journal width. */
+#bvlog-root .bv-install-footer{display:grid;gap:8px;justify-items:center;margin:18px 0 4px;padding:4px 0}
+#bvlog-root .bv-install-footer .bv-install-btn{width:44px;min-width:44px;height:44px;min-height:44px;padding:0;background:transparent;color:#315472;border:1px solid #c5d9e8;border-radius:10px}
+#bvlog-root .bv-install-footer .bv-install-help{width:100%;box-sizing:border-box}
+#bvlog-root .bv-photo-source{display:inline-flex;flex-direction:column;align-items:flex-start;max-width:100%;min-width:0;gap:4px}
+#bvlog-root .bv-photo-source>input[hidden]{display:none!important}
+#bvlog-root .bv-photo-source>button:disabled{opacity:.55;cursor:default}
+#bvlog-root .bv-photo-source-menu{display:flex;flex-wrap:wrap;gap:6px;padding:6px;background:#f3f8fe;border:1px solid #c5d9e8;border-radius:9px;max-width:100%;box-sizing:border-box}
+#bvlog-root .bv-photo-source-menu button{display:inline-flex;align-items:center;gap:5px;min-height:40px;padding:6px 9px;border:1px solid #b6cadc;border-radius:8px;background:#fff;color:#13547e;font-size:12px;font-weight:700;cursor:pointer}
+#bvlog-root .bv-photo-source button:focus-visible{outline:3px solid #f6a43b;outline-offset:2px}
+#bvlog-root .bv-event-main,#bvlog-root .bv-event-controls{min-width:0}
+@media(max-width:600px){
+  #bvlog-root .bv-event{display:grid;grid-template-columns:45px minmax(0,1fr);column-gap:13px;row-gap:7px}
+  #bvlog-root .bv-event-time{grid-column:1;grid-row:1;align-self:start}
+  #bvlog-root .bv-event-body{display:contents}
+  #bvlog-root .bv-event-main{grid-column:2;grid-row:1;min-width:0;overflow-wrap:anywhere}
+  #bvlog-root .bv-event-controls{grid-column:1/-1;grid-row:2;min-width:0;overflow-wrap:anywhere}
+  #bvlog-root .bv-event-controls:empty{display:none}
+  #bvlog-root .bv-event-photos{margin-top:0;max-width:100%}
+  #bvlog-root .bv-event-photos>button,#bvlog-root .bv-event-photos .bv-attach-inline{min-height:40px;max-width:100%;white-space:normal}
+  #bvlog-root .bv-event-actions{box-sizing:border-box;max-width:100%}
+}
+
+/* v0.8.2 install affordance: distinct SKB-inspired blue/red/white app tile. */
+#bvlog-root .bv-install-footer .bv-install-btn{display:flex;flex-direction:column;gap:4px;min-height:64px;height:auto;width:auto;min-width:78px;background:transparent;border:0;padding:3px 6px;color:var(--bv-navy);font-size:12px}
+#bvlog-root .bv-install-glyph{display:flex;align-items:center;justify-content:center;width:42px;height:42px;background:var(--bv-navy);color:white;border-radius:11px;box-shadow:0 2px 5px rgba(15,53,91,.18);border:1px solid #1a4b75}
+#bvlog-root .bv-install-accent{fill:#ff7474}
+#bvlog-root .bv-install-label{font-weight:700;line-height:1.2}

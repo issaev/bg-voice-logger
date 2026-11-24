@@ -3,7 +3,7 @@
  * Plugin Name: BG Voice Logger
  * Plugin URI: https://example.invalid/bg-voice-logger
  * Description: Field-first voice operations journal for Google Sheets with offline queue and Apps Script bridge.
- * Version: 0.7.2.1
+ * Version: 0.8.2.1
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: BG Voice Logger Project
@@ -13,7 +13,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('BVLOG_VERSION', '0.7.2.1');
+define('BVLOG_VERSION', '0.8.2.1');
 define('BVLOG_DIR', plugin_dir_path(__FILE__));
 define('BVLOG_URL', plugin_dir_url(__FILE__));
 
@@ -98,7 +98,9 @@ add_action('init', function () {
         header('Content-Type: application/manifest+json; charset=UTF-8');
         header('Cache-Control: no-store');
         echo wp_json_encode(array(
-            'name' => 'Документ за координация на акция', 'short_name' => 'ДКА',
+            'name' => 'Документ за Координация на Акция', 'short_name' => 'ДКА',
+            'id' => wp_parse_url(bvlog_app_url(), PHP_URL_PATH) ?: '/',
+            'scope' => wp_parse_url(bvlog_app_url(), PHP_URL_PATH) ?: '/',
             'start_url' => bvlog_app_url(), 'display' => 'standalone',
             'background_color' => '#f1f5f9', 'theme_color' => '#0f355b',
             'icons' => array(
@@ -115,6 +117,8 @@ add_action('init', function () {
         header('X-Content-Type-Options: nosniff');
         header('Service-Worker-Allowed: /');
         echo 'self.BVLOG_APP_URL = ' . wp_json_encode(bvlog_app_url()) . ';';
+        echo 'self.BVLOG_API_ROOT = ' . wp_json_encode(rest_url('bvlog/v1/')) . ';';
+        echo 'self.BVLOG_NONCE_URL = ' . wp_json_encode(admin_url('admin-ajax.php?action=bvlog_nonce')) . ';';
         echo 'self.BVLOG_CACHE_ID = ' . wp_json_encode('bgvl-' . bvlog_service_worker_build() . '-assets') . ';';
         echo 'self.BVLOG_REQUIRED_ASSETS = ' . wp_json_encode(array(
             BVLOG_URL . 'assets/app.js?ver=' . rawurlencode(bvlog_asset_version('assets/app.js')),
@@ -174,6 +178,7 @@ add_shortcode('bg_voice_logger', function () {
 });
 
 add_action('rest_api_init', array('BVLOG_API', 'register_routes'));
+add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 10, 4);
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('admin_menu', array('BVLOG_Admin', 'register_menu'));
 add_action('admin_post_bvlog_save', array('BVLOG_Admin', 'save'));
@@ -185,6 +190,9 @@ add_action('wp_head', function () {
         if ($post && has_shortcode($post->post_content, 'bg_voice_logger')) {
             echo '<link rel="manifest" href="' . esc_url(home_url('/?bvlog_manifest=1')) . '">';
             echo '<meta name="theme-color" content="#0f355b">';
+            echo '<meta name="apple-mobile-web-app-capable" content="yes">';
+            echo '<meta name="apple-mobile-web-app-title" content="ДКА">';
+            echo '<link rel="apple-touch-icon" href="' . esc_url(BVLOG_URL . 'assets/icon-192.png') . '">';
         }
     }
 });

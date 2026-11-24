@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-613947b7e695';
+  const BVLOG_RUNNING_BUILD = '0.8.2.1-188c8b66fb21';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -53,6 +53,7 @@
       map: ['M12 22s8-7 8-13a8 8 0 0 0-16 0c0 6 8 13 8 13z','M12 9a2 2 0 1 0 0 4 2 2 0 0 0 0-4'],
       shield: ['M12 2l9 4v6c0 6-4 9-9 10C7 21 3 18 3 12V6z','M9 12l2 2 4-4'],
       upload: ['M12 16V3','M7 8l5-5 5 5','M3 16v5h18v-5'],
+      download: ['M12 3v12','M5 10l7 7 7-7','M4 20h16'],
       settings: ['M12 2v2','M12 20v2','M2 12h2','M20 12h2','M4.9 4.9l1.4 1.4','M17.7 17.7l1.4 1.4','M19.1 4.9l-1.4 1.4','M6.3 17.7l-1.4 1.4','M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8'],
       more:['M5 12h.01','M12 12h.01','M19 12h.01']
     };
@@ -62,6 +63,8 @@
   // v0.6.2: media bytes are stored separately from mutable queue metadata.
   // Safari may reject structured-cloning a Blob into IndexedDB; use ArrayBuffer instead.
   const DB_SCHEMA = 2;
+  const SYNC_LEASE_MS = 180000;
+  const SYNC_TAG = 'bvlog-outbox-v1';
   const MEDIA_FIELDS = ['blob','preview_blob'];
   function hasQueueMedia(item, field) {
     const name=field||'blob';
@@ -155,6 +158,42 @@
       }catch(e){try{tx.abort();}catch(ignore){}reject(e);}
     });
   }
+  async function syncLease(owner, release=false, scope=DB) {
+    // Keep the existing v2 queue DB untouched: old production code must still
+    // be able to open it after rollback, without a VersionError.
+    const db=await new Promise((resolve,reject)=>{
+      const req=indexedDB.open('bg-voice-logger-sync-leases-v1',1);
+      req.onupgradeneeded=()=>{
+        if(!req.result.objectStoreNames.contains('locks'))req.result.createObjectStore('locks',{keyPath:'id'});
+      };
+      req.onsuccess=()=>resolve(req.result);
+      req.onerror=()=>reject(req.error||new Error('Не може да се отвори sync lock.'));
+      req.onblocked=()=>reject(new Error('Друг прозорец блокира sync lock.'));
+    });
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('locks','readwrite');
+      const store=tx.objectStore('locks');
+      let held=false;
+      tx.oncomplete=()=>{db.close();resolve(held);};
+      tx.onabort=()=>{db.close();reject(tx.error||new Error('Локалното заключване за sync е недостъпно.'));};
+      const req=store.get(scope);
+      req.onsuccess=()=>{
+        const old=req.result;
+        if(release){
+          if(old&&old.owner===owner){store.delete(scope);held=true;}
+        }else if(!old||old.owner===owner||Number(old.expires||0)<Date.now()){
+          store.put({id:scope,owner,expires:Date.now()+SYNC_LEASE_MS});held=true;
+        }
+      };
+    });
+  }
+  function requestBackgroundSync() {
+    // Only register a tag. Never send operator identity, CSRF or incident data to SW.
+    if(!('serviceWorker' in navigator)||!window.isSecureContext)return;
+    navigator.serviceWorker.ready.then(reg=>{
+      if(reg.sync&&typeof reg.sync.register==='function')return reg.sync.register(SYNC_TAG);
+    }).catch(()=>{}); // Missing Background Sync is normal on iOS/Safari.
+  }
   async function queueBlob(item, field) {
     const name=field||'blob';
     if(!item)return null;
@@ -200,8 +239,23 @@
       return (c==='x'?v:(v&3|8)).toString(16);
     });
   }
+  const READ_RETRY_DELAYS_MS = [5000,15000,30000];
+  const MAX_TRANSIENT_WRITE_ATTEMPTS = 5;
+  function isTransientRequestError(error) {
+    if (!error || error.name==='AbortError') return false;
+    if (error.retryable===true) return true;
+    if (error.retryable===false) return false;
+    const status=Number(error.status||0);
+    if (status) return [408,424,429,500,502,503,504].includes(status)||status>=500;
+    return /failed to fetch|networkerror|network request failed|load failed|timed? ?out/i.test(String(error.message||''));
+  }
+  function writeRetryDelayMs(attempt) {
+    // Jitter prevents many reconnecting phones from retrying together.
+    const base=Math.min(300000,5000*Math.pow(2,Math.max(0,attempt-1)));
+    return Math.round(base*(0.8+0.4*Math.random()));
+  }
   async function api(path, method, data, signal) {
-    const opts = {method:method||'GET',headers:{},credentials:'same-origin'};
+    const opts = {method:method||'GET',headers:{},credentials:'same-origin',cache:'no-store'};
     if(signal)opts.signal=signal;
     if (CFG.nonce && CFG.user && CFG.user.id) opts.headers['X-WP-Nonce']=CFG.nonce;
     if (CFG.csrf) opts.headers['X-BVLOG-CSRF']=CFG.csrf;
@@ -210,19 +264,38 @@
       opts.headers['Content-Type']='application/json';
       opts.body=JSON.stringify(data||{});
     }
-    let r = await fetch(CFG.api+path,opts);
+    const fetchSafe=async(url,options)=>{
+      try { return await fetch(url,options); }
+      catch (cause) {
+        if(cause&&cause.name==='AbortError')throw cause;
+        const error=new Error('Временен проблем с връзката (Failed to fetch).');
+        error.code='network';error.retryable=true;error.name='BvlogNetworkError';
+        throw error;
+      }
+    };
+    let r = await fetchSafe(CFG.api+path,opts);
     if (r.status===403 && CFG.nonce && CFG.user && CFG.user.id && navigator.onLine) {
-      const reset = await fetch(CFG.nonce_url,{credentials:'same-origin'});
+      const reset = await fetchSafe(CFG.nonce_url,{credentials:'same-origin'});
       const answer = await reset.json();
       if (answer.success && answer.data && answer.data.nonce) {
         CFG.nonce = answer.data.nonce;
         opts.headers['X-WP-Nonce']=CFG.nonce;
-        r = await fetch(CFG.api+path,opts);
+        r = await fetchSafe(CFG.api+path,opts);
       }
     }
     let out;
-    try { out = await r.json(); } catch (err) { throw new Error('Invalid server response (HTTP '+r.status+').'); }
-    if (!r.ok) throw new Error(out.message||'HTTP '+r.status);
+    try { out = await r.json(); } catch (err) {
+      const error=new Error('Невалиден отговор от сървъра (HTTP '+r.status+').');
+      error.status=r.status;error.code='invalid_json';
+      error.retryable=[408,424,429,500,502,503,504].includes(r.status)||r.status>=500;
+      throw error;
+    }
+    if (!r.ok) {
+      const error=new Error(out.message||'HTTP '+r.status);
+      error.status=r.status;error.code=String(out.code||'');
+      error.retryable=[408,424,429,500,502,503,504].includes(r.status)||r.status>=500;
+      throw error;
+    }
     return out;
   }
   function today(time) {
@@ -249,7 +322,7 @@
     return !!(o&&docId&&o.doc_id===docId&&
       (o.kind==='log'||(o.kind==='audio'&&!(o.target&&o.target.kind==='field'))));
   }
-  function EntryStatus({status}) {
+  function EntryStatus({status,retryAt}) {
     const m = {
       synced:['check',B('Sinhronizirano'),'good'], pending:['clock',B('V opashkata'),'wait'],
       sending:['refresh',B('Izprashta se'),'wait'], local_error:['alert','Проблем с локалното аудио','bad'], conflict:['alert',B('Konflikt'),'bad'],
@@ -257,11 +330,56 @@
       voice_review:['edit','За потвърждение','wait'], review:['edit',B('Proveri poleto'),'wait'],
       photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
     };
-    const x = m[status]||['alert',B('Greshka'),'bad'];
+    const x = status==='pending'&&retryAt&&Date.parse(retryAt)>Date.now()?
+      ['clock','Автоматичен повторен опит','wait']:(m[status]||['alert',B('Greshka'),'bad']);
     return h('span',{className:'bv-status '+x[2]},icon(x[0],14),x[1]);
   }
   function Button({children,onClick,secondary,disabled,className,type}) {
     return h('button',{type:type||'button',className:'bv-btn '+(secondary?'secondary ':'')+(className||''),disabled:!!disabled,onClick:onClick},children);
+  }
+  function PhotoSourcePicker({disabled,onFiles,compact}) {
+    const [open, setOpen] = useState(false);
+    const trigger=useRef(null), camera=useRef(null), gallery=useRef(null), first=useRef(null);
+    useEffect(()=>{if(open&&first.current)first.current.focus();},[open]);
+    useEffect(()=>{if(disabled)setOpen(false);},[disabled]);
+    function close(){setOpen(false);if(trigger.current)trigger.current.focus();}
+    function choose(ref){
+      // Native camera/file picker must be invoked in this same user gesture.
+      if(disabled||!ref.current)return;
+      ref.current.click();close();
+    }
+    function picked(e){
+      const files=Array.from(e.target.files||[]);
+      e.target.value='';
+      if(files.length&&!disabled)onFiles(files);
+    }
+    const cls=compact?'bv-attach-inline':'bv-photo-pick';
+    return h('div',{className:'bv-photo-source',onKeyDown:e=>{if(e.key==='Escape'&&open){e.preventDefault();close();}}},
+      h('button',{type:'button',className:cls,disabled:disabled,ref:trigger,'aria-expanded':open,
+        onClick:()=>setOpen(v=>!v)},icon('image',16),' Добави снимка'),
+      h('input',{ref:gallery,type:'file',accept:'image/*',multiple:true,disabled:disabled,hidden:true,onChange:picked}),
+      h('input',{ref:camera,type:'file',accept:'image/*',capture:'environment',disabled:disabled,hidden:true,onChange:picked}),
+      open&&!disabled&&h('div',{className:'bv-photo-source-menu',role:'group','aria-label':'Добавяне на изображение'},
+        h('button',{type:'button',ref:first,onClick:()=>choose(camera)},icon('camera',17),' Снимай'),
+        h('button',{type:'button',onClick:()=>choose(gallery)},icon('image',17),' От галерията'),
+        h('button',{type:'button',onClick:close},'Отказ')));
+  }
+  // A Google popup may take longer than the login cookie lifetime. Obtain
+  // the challenge immediately before exchanging the credential. One bounded
+  // retry is safe only for an explicit challenge rejection, before JWT verification.
+  async function exchangeGoogleCredential(credential) {
+    for(let attempt=0;attempt<2;attempt++){
+      const fresh=await api('auth/session');
+      CFG.login_challenge=fresh.login_challenge||'';
+      if(!/^[a-f0-9]{40}$/.test(CFG.login_challenge))
+        throw new Error('Не може да се получи защитен код за вход. Опитай отново.');
+      try{
+        return await api('auth/google','POST',{credential});
+      }catch(e){
+        if(e.code!=='bvlog_login_csrf')throw e;
+        if(attempt===1)throw new Error('Входът не може да потвърди защитната бисквитка. Провери дали браузърът позволява бисквитки за сайта и опитай отново.');
+      }
+    }
   }
   function loadGIS() {
     if(window.google && google.accounts && google.accounts.id) return Promise.resolve();
@@ -307,10 +425,11 @@
     pctx.drawImage(cv,Math.round((640-w)/2),Math.round((480-hh)/2),w,hh);
     let previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.7));
     if(previewBlob&&previewBlob.size>350000)previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.42));
+    const previewSrc=preview.toDataURL('image/jpeg',0.65);
     preview.width=0;preview.height=0;cv.width=0;cv.height=0;
     if(!blob||blob.size>2400000)throw new Error('Снимката е твърде голяма след компресиране.');
     if(!previewBlob||previewBlob.size>350000)throw new Error('Неуспешно създаване на миниатюра.');
-    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg'};
+    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg',previewSrc};
   }
   // Capture a calendar day in Sofia, not a UTC timestamp.
   function sofiaTodayISO(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Sofia'});}
@@ -320,11 +439,25 @@
     const utc=new Date(Date.UTC(year,month-1,day));
     return utc.getUTCFullYear()===year&&utc.getUTCMonth()===month-1&&utc.getUTCDate()===day;
   }
+  function installedAsPwa() {
+    try {
+      return navigator.standalone===true ||
+        !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    }catch(e){return false;}
+  }
+  function iosInstallDevice() {
+    const ua=String(navigator.userAgent||'');
+    return /iPhone|iPad|iPod/i.test(ua) ||
+      (navigator.platform==='MacIntel' && Number(navigator.maxTouchPoints||0)>1);
+  }
+  function androidInstallDevice() {return /Android/i.test(String(navigator.userAgent||''));}
   function App() {
     const [mode,setMode]=useState('choose');
     const [doc,setDoc]=useState(null);
     const [page,setPage]=useState('LOG');
+    const pageRef=useRef('LOG'),viewRef=useRef({id:'',tab:'LOG',hasData:false});
     const [data,setData]=useState(null);
+    const [cachedView,setCachedView]=useState(false);
     const [docs,setDocs]=useState([]);
     const [docsLoading,setDocsLoading]=useState(false);
     const [creating,setCreating]=useState(false);
@@ -332,15 +465,42 @@
     const [actionTypes,setActionTypes]=useState(TYPES);
     const [newPlace,setNewPlace]=useState('');
     const [incidentDate,setIncidentDate]=useState(sofiaTodayISO);
-    const [createId,setCreateId]=useState(uuid());
+    const [pendingCreate,setPendingCreate]=useState(null);
+    const createPendingRef=useRef(null),createFlightRef=useRef(false),createScopeRef=useRef(0);
+    function restorePendingCreate(){
+      let saved=null;
+      try{saved=JSON.parse(localStorage.getItem(localCacheKey('pending-create'))||'null');}catch(ignore){}
+      if(!saved||!(/^[a-f0-9-]{32,50}$/i.test(saved.create_id||''))||
+        typeof saved.type!=='string'||typeof saved.place!=='string'||!isIncidentDate(saved.incident_date))saved=null;
+      createPendingRef.current=saved;setPendingCreate(saved);
+      if(saved){setNewType(saved.type);setNewPlace(saved.place);setIncidentDate(saved.incident_date);setCreating(true);}
+      return saved;
+    }
+    function clearPendingCreate(scopeKey,id){
+      try{const saved=JSON.parse(localStorage.getItem(scopeKey)||'null');
+        if(saved&&saved.create_id===id)localStorage.removeItem(scopeKey);
+      }catch(ignore){}
+      if(scopeKey===localCacheKey('pending-create')&&createPendingRef.current?.create_id===id){
+        createPendingRef.current=null;setPendingCreate(null);
+      }
+    }
     const [selectedDoc,setSelectedDoc]=useState('');
     const docsRequestRef=useRef(0);
+    const selectedDocRef=useRef('');
+    const selectedDocManualRef=useRef(false);
     const [operatorName,setOperatorName]=useState(initialOperator());
     const [online,setOnline]=useState(navigator.onLine);
+    const [backgroundSyncAvailable,setBackgroundSyncAvailable]=useState(false);
+    const [installReady,setInstallReady]=useState(false);
+    const [installedPwa,setInstalledPwa]=useState(installedAsPwa);
+    const [installHelpOpen,setInstallHelpOpen]=useState(false);
+    const [installStatus,setInstallStatus]=useState('');
+    const installPromptRef=useRef(null);
     const [auth,setAuth]=useState(null);
     const [authLoading,setAuthLoading]=useState(true);
     const [loginChallenge,setLoginChallenge]=useState('');
     const [loginError,setLoginError]=useState('');
+    const loginInFlightRef=useRef(false);
     const [queueOpen,setQueueOpen]=useState(false);
     const [showCompletedQueue,setShowCompletedQueue]=useState(false);
     const [photos,setPhotos]=useState([]);
@@ -373,6 +533,8 @@
     const documentRequestRef=useRef(0);
     const documentReadInFlightRef=useRef(null);
     const readBackoffRef=useRef({id:'',attempts:0,nextAt:0});
+    const readRetryRef=useRef({id:'',attempts:0,nextAt:0,timer:null,exhausted:false});
+    const writeRetryTimerRef=useRef(null);
     const [draft,setDraft]=useState('');
     const [liveText,setLiveText]=useState('');
     const [recording,setRecording]=useState(false);
@@ -427,6 +589,55 @@
       }
     }
     useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3200);return()=>clearTimeout(timer);},[notice]);
+    useEffect(()=>{
+      // beforeinstallprompt is a browser capability, not a platform guarantee.
+      // iOS has no programmatic install prompt: offer user-visible instructions.
+      const onPrompt=e=>{
+        if(!e||typeof e.prompt!=='function')return;
+        if(typeof e.preventDefault==='function')e.preventDefault();
+        installPromptRef.current=e;
+        setInstallReady(true);
+      };
+      const onInstalled=()=>{
+        installPromptRef.current=null;
+        setInstallReady(false);setInstallHelpOpen(false);setInstalledPwa(true);
+        setInstallStatus('Приложението е добавено към началния екран.');
+      };
+      const onModeChange=()=>setInstalledPwa(installedAsPwa());
+      if(window.addEventListener){
+        window.addEventListener('beforeinstallprompt',onPrompt);
+        window.addEventListener('appinstalled',onInstalled);
+      }
+      const media=window.matchMedia?window.matchMedia('(display-mode: standalone)'):null;
+      if(media?.addEventListener)media.addEventListener('change',onModeChange);
+      return()=>{
+        if(window.removeEventListener){
+          window.removeEventListener('beforeinstallprompt',onPrompt);
+          window.removeEventListener('appinstalled',onInstalled);
+        }
+        if(media?.removeEventListener)media.removeEventListener('change',onModeChange);
+      };
+    },[]);
+    async function installOnPhone() {
+      setInstallStatus('');
+      const pending=installPromptRef.current;
+      if(pending&&typeof pending.prompt==='function'){
+        // Consume on the user click: prompt() must not run from an effect/timer.
+        installPromptRef.current=null;
+        setInstallReady(false);
+        try {
+          const result=await pending.prompt();
+          const choice=pending.userChoice?await pending.userChoice:result;
+          if(choice&&choice.outcome==='accepted'){
+            setInstallStatus('Заявката за инсталиране е приета от браузъра.');
+            setInstallHelpOpen(false);
+          }else setInstallHelpOpen(true);
+        }catch(e){
+          // A prompt can expire or be blocked; provide safe manual instructions.
+          setInstallHelpOpen(true);
+        }
+      }else setInstallHelpOpen(true);
+    }
     useEffect(()=>{
       if(!microphoneMenu||!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
       let live=true;
@@ -509,7 +720,7 @@
       }catch(err){if(requestId===galleryRequestRef.current)setGalleryError(err.message);}finally{if(requestId===galleryRequestRef.current)setGalleryBusy(false);}
     }
     async function checkAuth() {
-      setAuthLoading(true);
+      setAuthLoading(true);setLoginError('');
       try {
         const response=await api('auth/session');
         CFG.login_challenge=response.login_challenge||'';
@@ -546,15 +757,18 @@
         if(!mount)return;
         mount.innerHTML='';
         google.accounts.id.initialize({client_id:CFG.google_client_id,ux_mode:'popup',callback:async ({credential})=>{
+          if(loginInFlightRef.current)return;
+          loginInFlightRef.current=true;
           try{
             setLoginError('');
-            const data=await api('auth/google','POST',{credential});
+            const data=await exchangeGoogleCredential(credential);
             if(!data.ok)throw new Error(data.message||'Google login failed');
             CFG.csrf=data.csrf||'';
             await bindUserQueue(data.identity);
             try {localStorage.setItem('bvlog-last-identity',JSON.stringify({identity:data.identity,time:Date.now()}));} catch(e) {}
             setAuth(data.identity);
           }catch(e){setLoginError(e.message);}
+          finally{loginInFlightRef.current=false;}
         }});
         google.accounts.id.renderButton(mount,{theme:'outline',size:'large',shape:'pill',text:'signin_with',width:260});
       }).catch(e=>{if(active)setLoginError(e.message);});
@@ -563,7 +777,12 @@
     async function googleLogout(){
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
-      docsRequestRef.current++;
+      docsRequestRef.current++;documentRequestRef.current++;docRef.current=null;createScopeRef.current++;
+      clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
+      documentReadInFlightRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};
+      setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
+      createPendingRef.current=null;setPendingCreate(null);setCreating(false);
+      selectedDocRef.current='';selectedDocManualRef.current=false;
       CFG.csrf='';setAuth(null);setMode('choose');setDoc(null);setData(null);setDocs([]);setSelectedDoc('');setQueueOpen(false);setQueue([]);
       try{localStorage.removeItem('bvlog-last-identity');}catch(e){}
       if(window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
@@ -571,21 +790,39 @@
     }
 
 
+    function selectExistingDocument(id) {
+      selectedDocManualRef.current=true;
+      selectedDocRef.current=String(id||'');
+      setSelectedDoc(selectedDocRef.current);
+      setDocsError('');
+    }
     async function bindUserQueue(identity){
       if(!identity)return;
       const newDB=identity.kind==='google'&&identity.sub
         ? 'bg-voice-logger-queue-v3-google-'+identity.sub
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
-        docsRequestRef.current++;
+        docsRequestRef.current++;documentRequestRef.current++;createScopeRef.current++;
+        clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
+        documentReadInFlightRef.current=null;docRef.current=null;
+        viewRef.current={id:'',tab:'LOG',hasData:false};pageRef.current='LOG';
+        setDoc(null);setMode('choose');setData(null);setPage('LOG');
+        setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
+        selectedDocRef.current='';selectedDocManualRef.current=false;
         DB=newDB;dbPromise=null;
       }
       try {
         const cached=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'null');
         const ownDocs=Array.isArray(cached)?cached:[];
-        setDocs(ownDocs);setSelectedDoc(ownDocs[0]?ownDocs[0].id:'');
-      } catch(e) {setDocs([]);setSelectedDoc('');}
+        setDocs(ownDocs);
+        if(!selectedDocManualRef.current){
+          selectedDocRef.current=ownDocs[0]?ownDocs[0].id:'';
+          setSelectedDoc(selectedDocRef.current);
+        }
+      } catch(e) {setDocs([]);if(!selectedDocManualRef.current){selectedDocRef.current='';setSelectedDoc('');}}
+      restorePendingCreate();
       await refreshQueue();
+      requestBackgroundSync();
     }
     async function importLegacyQueue(){
       if(!auth || auth.kind!=='google')return;
@@ -609,7 +846,8 @@
             await database('put','queue',Object.assign({},item,{state:item.state==='sending'?'pending':item.state}));count++;
           }
         }
-        await refreshQueue();setNotice('Импортирани '+count+' неприключени записи; старите данни са запазени.');
+        await refreshQueue();requestBackgroundSync();
+        setNotice('Импортирани '+count+' неприключени записи; старите данни са запазени.');
       }catch(e){setError('Неуспешен импорт: '+e.message);}
     }
     function changeOperatorName(value) {
@@ -641,74 +879,219 @@
         setDocs(fresh);
         if(Array.isArray(r.action_types) && r.action_types.length){
           const types=r.action_types.filter(x=>typeof x==='string' && x.length && x!==B('Izberi ot menyuto'));
-          if(types.length){setActionTypes(types);setNewType(old=>types.includes(old)?old:types[0]);}
+          if(types.length){setActionTypes(types);if(!createPendingRef.current)setNewType(old=>types.includes(old)?old:types[0]);}
         }
-        // Never override a selection made while this async request was pending.
-        setSelectedDoc(previous=>fresh.some(x=>x.id===previous)?previous:(fresh[0]?fresh[0].id:''));
+        // A user choice made during an in-flight request is never replaced with the latest incident.
+        const chosen=selectedDocRef.current;
+        if(chosen && fresh.some(x=>x.id===chosen)){
+          setSelectedDoc(chosen);setDocsError('');
+        }else if(selectedDocManualRef.current){
+          // If the chosen file disappeared, force an explicit fresh selection.
+          selectedDocRef.current='';setSelectedDoc('');
+          setDocsError('Избраната акция вече не е налична в папката. Избери друга акция.');
+        }else{
+          selectedDocRef.current=fresh[0]?fresh[0].id:'';
+          setSelectedDoc(selectedDocRef.current);setDocsError('');
+        }
         localStorage.setItem(localCacheKey('docs'),JSON.stringify(fresh));
-        setDocsError('');
       }catch(e){if(request===docsRequestRef.current && scope===DB)setDocsError(e.message);}
       finally{if(request===docsRequestRef.current && scope===DB)setDocsLoading(false);}
     }
-    async function loadDocument(id) {
-      // A manual refresh and the 120s poll must not launch the same read twice.
-      if(documentReadInFlightRef.current?.id===id)return false;
+    // These timers only retry transport failures. Never create a second write
+    // because a post-write document refresh failed.
+    function clearReadRetry() {
+      if(readRetryRef.current.timer!=null)window.clearTimeout(readRetryRef.current.timer);
+      readRetryRef.current={id:'',attempts:0,nextAt:0,timer:null,exhausted:false};
+    }
+    function runScheduledReadRetry() {
+      const job=readRetryRef.current;
+      job.timer=null;
+      if(!job.id||job.exhausted)return;
+      if(job.id!==docRef.current?.id){clearReadRetry();return;}
+      if(!navigator.onLine||document.hidden)return; // resume on online/visibility.
+      if(Date.now()<job.nextAt){scheduleReadRetryTimer();return;}
+      const active=refreshRef.current;
+      if(!active||active.id!==job.id||!active.ready||syncingRef.current||documentReadInFlightRef.current){
+        job.nextAt=Date.now()+15000;
+        scheduleReadRetryTimer();return;
+      }
+      active.load(job.id,true);
+    }
+    function scheduleReadRetryTimer() {
+      const job=readRetryRef.current;
+      if(!job.id||job.exhausted)return;
+      if(job.timer!=null)window.clearTimeout(job.timer);
+      job.timer=window.setTimeout(runScheduledReadRetry,Math.max(200,job.nextAt-Date.now()));
+    }
+    function scheduleReadRetry(id,error,automatic) {
+      if(!isTransientRequestError(error)||id!==docRef.current?.id)return false;
+      const previous=readRetryRef.current;
+      const attempts=(automatic&&previous.id===id?previous.attempts:0)+1;
+      if(previous.timer!=null)window.clearTimeout(previous.timer);
+      if(attempts>READ_RETRY_DELAYS_MS.length){
+        readRetryRef.current={id,attempts:READ_RETRY_DELAYS_MS.length,nextAt:0,timer:null,exhausted:true};
+        return false;
+      }
+      readRetryRef.current={id,attempts,nextAt:Date.now()+READ_RETRY_DELAYS_MS[attempts-1],timer:null,exhausted:false};
+      scheduleReadRetryTimer();return true;
+    }
+    function scheduleWriteRetry(items) {
+      if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);
+      writeRetryTimerRef.current=null;
+      const dates=items.filter(o=>{
+        if(o.state!=='pending'||!o.next_retry)return false;
+        const parentId=o.kind==='audio_upload'?o.target_id:o.kind==='photo'?o.log_op_id:null;
+        const parent=parentId&&items.find(x=>x.op_id===parentId);
+        return !parent||parent.state==='synced'; // never spin waiting on a blocked parent.
+      }).map(o=>Date.parse(o.next_retry)).filter(Number.isFinite);
+      if(!dates.length)return;
+      writeRetryTimerRef.current=window.setTimeout(()=>{
+        writeRetryTimerRef.current=null;
+        if(navigator.onLine&&!document.hidden)syncAll();
+      },Math.max(250,Math.min(...dates)-Date.now()));
+    }
+    // Snapshot keys are tab-scoped in the same per-operator database. The old
+    // whole-document snapshot is a read-only compatibility fallback.
+    function tabSnapshotKey(id,tab){return id+':'+tab;}
+    function hasTabData(value,tab){
+      return !!value&&Array.isArray(value[tab]);
+    }
+    function resetView(id,tab){
+      viewRef.current={id,tab,hasData:false};
+      setData(null);setCachedView(false);setLastFreshAt('');setDocLoadError('');
+    }
+    async function loadDocument(id,automaticRetry=false,requestedTab,force=false) {
+      const tab=['LOG','INFO','TEAM','TECH'].includes(requestedTab)?requestedTab:pageRef.current;
+      const scope=DB;
+      if(id!==docRef.current?.id||tab!==pageRef.current)return false;
+      const previousFlight=documentReadInFlightRef.current;
+      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab)return false;
+      if(!automaticRetry)clearReadRetry();
       const request=++documentRequestRef.current;
-      documentReadInFlightRef.current={id,request};
+      if(previousFlight?.controller)previousFlight.controller.abort();
+      const controller=typeof AbortController==='function'?new AbortController():null;
+      documentReadInFlightRef.current={id,tab,request,controller};
+      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id&&tab===pageRef.current;
+      const key=tabSnapshotKey(id,tab);
+      if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
       setDocLoading(true);setDocLoadError('');
+      async function showCached(){
+        try{
+          let snap=await database('get','snapshots',key);
+          if(!current())return false;
+          if(!snap||!hasTabData(snap.data,tab))snap=await database('get','snapshots',id);
+          if(!current()||!snap||!hasTabData(snap.data,tab))return false;
+          if(!viewRef.current.hasData){
+            setData(snap.data);setCachedView(true);
+            viewRef.current={id,tab,hasData:true};
+          }
+          return true;
+        }catch(ignore){return false;}
+      }
       try{
         if(!navigator.onLine){
-          const snap=await database('get','snapshots',id);
-          if(request!==documentRequestRef.current)return;
-          setData(snap?snap.data:null);
-          if(!snap)setDocLoadError('Няма офлайн копие на този документ. Свържи се с интернет.');
+          const found=await showCached();
+          if(current()){
+            setCachedView(true);
+            if(!found&&!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
+          }
           return;
         }
-        const r=await api('document/'+encodeURIComponent(id));
-        if(!r.ok)throw new Error(r.message||'Document read failed');
-        if(request!==documentRequestRef.current)return;
-        setData(r.data);
-        setLastFreshAt(new Date().toISOString());
-        readBackoffRef.current={id,attempts:0,nextAt:0};
-        try{await database('put','snapshots',{id,data:r.data,updated:new Date().toISOString()});}
-        catch(localError){setNotice('Данните са заредени, но офлайн копието не е обновено.');}
+        // Paint an existing private snapshot quickly, but only live data can
+        // set the fresh timestamp. No private HTTP/Service Worker caching.
+        if(!viewRef.current.hasData)await showCached();
+        if(!current())return;
+        const separator=String(CFG.api||'').includes('?')?'&':'?';
+        const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab,'GET',undefined,controller?.signal);
+        if(!r.ok||r.id&&r.id!==id||!hasTabData(r.data,tab)||
+          (Array.isArray(r.loaded_tabs)&&!r.loaded_tabs.includes(tab)))
+          throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
+        if(!current())return;
+        const stamp=new Date().toISOString();
+        setData(r.data);setCachedView(false);setLastFreshAt(stamp);
+        viewRef.current={id,tab,hasData:true};
+        readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        try{await database('put','snapshots',{id:key,data:r.data,updated:stamp});}
+        catch(localError){if(current())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
-        if(request!==documentRequestRef.current)return;
-        try{const snap=await database('get','snapshots',id);if(snap)setData(snap.data);}
-        catch(ignore){}
-        setDocLoadError('Google Sheets: '+(e.message||'Неуспешно обновяване.')+
-          (lastFreshAt?' Показани са последните потвърдени данни от '+timeOf(lastFreshAt)+'.':''));
+        if(!current())return;
+        if(!viewRef.current.hasData)await showCached();
+        if(!current())return;
+        const scheduled=scheduleReadRetry(id,e,automaticRetry);
+        setDocLoadError('Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
+          (viewRef.current.hasData?' Показани са последните налични данни.':'')+
+          (scheduled?' Автоматичен повторен опит е планиран.':''));
         const previous=readBackoffRef.current;
         const attempts=(previous.id===id?previous.attempts:0)+1;
-        readBackoffRef.current={id,attempts,
-          nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
       }finally{
         if(documentReadInFlightRef.current?.request===request)documentReadInFlightRef.current=null;
-        if(request===documentRequestRef.current)setDocLoading(false);
+        if(current())setDocLoading(false);
       }
     }
-    async function startSession(chosen) {
-      if (!chosen || !checkOperatorName()) return;
-      setDoc(chosen); docRef.current=chosen;
+    async function startSession(chosen,bootstrap) {
+      if(!chosen||!checkOperatorName())return;
+      clearReadRetry();documentRequestRef.current++;
+      documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;
+      setDoc(chosen);docRef.current=chosen;pageRef.current='LOG';
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
-      setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
-      localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));
-      await loadDocument(chosen.id);
-      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+      setPage('LOG');setMode('session');resetView(chosen.id,'LOG');setError('');setSecondInfo(false);
+      try{localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));}catch(ignore){}
+      if(bootstrap&&bootstrap.id===chosen.id&&Array.isArray(bootstrap.loaded_tabs)&&
+        bootstrap.loaded_tabs.includes('LOG')&&hasTabData(bootstrap.data,'LOG')){
+        const stamp=new Date().toISOString();
+        setData(bootstrap.data);setCachedView(false);setLastFreshAt(stamp);setDocLoading(false);
+        viewRef.current={id:chosen.id,tab:'LOG',hasData:true};
+        try{await database('put','snapshots',{id:tabSnapshotKey(chosen.id,'LOG'),data:bootstrap.data,updated:stamp});}
+        catch(ignore){}
+      }else await loadDocument(chosen.id,false,'LOG');
+      if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+    }
+    function switchTab(tab){
+      if(!docRef.current||tab===pageRef.current||recording||fieldRecording||logSaving||rowSaving)return;
+      if(editing||logEditor||rowAdd||infoAdding>=0){
+        setError('Запази или откажи текущата редакция, преди да смениш раздела.');return;
+      }
+      clearReadRetry();pageRef.current=tab;setPage(tab);resetView(docRef.current.id,tab);
+      loadDocument(docRef.current.id,false,tab);
     }
     async function newDocument() {
-      if (!newPlace.trim() || !checkOperatorName()) return;
-      if(!isIncidentDate(incidentDate)){setError('Избери валидна дата на акцията.');return;}
-      setBusy(true);setError('');
-      try {
-        const r=await api('documents','POST',{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:createId});
-        if (!r.ok) throw new Error(r.message||'Create failed');
-        await loadDocs();
-        setSelectedDoc(r.document.id);
-        setCreating(false);setCreateId(uuid());
-        await startSession(r.document);
-      } catch(e) { setError(e.message); }
-      finally { setBusy(false); }
+      if(createFlightRef.current||!checkOperatorName())return;
+      const scope=DB,generation=createScopeRef.current,key=localCacheKey('pending-create');
+      const current=()=>scope===DB&&generation===createScopeRef.current;
+      const saved=restorePendingCreate();
+      if(!saved&&(!newPlace.trim()||!isIncidentDate(incidentDate))){setError('Въведи място и валидна дата на акцията.');return;}
+      const payload=saved||{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:uuid()};
+      // Persist before contacting Google. Refresh/retry uses the exact same ID and payload.
+      try{localStorage.setItem(key,JSON.stringify(payload));}
+      catch(e){setError('Не може да се запази идентификаторът за безопасно създаване. Провери локалното съхранение.');return;}
+      createPendingRef.current=payload;setPendingCreate(payload);
+      createFlightRef.current=true;setBusy(true);setError('');
+      try{
+        const r=await api('documents','POST',Object.assign({},payload,{bootstrap:true}));
+        if(!r.ok){
+          if(['action_type','place','invalid_date','create_id','configuration'].includes(r.code))clearPendingCreate(key,payload.create_id);
+          throw new Error(r.message||'Create failed');
+        }
+        if(!r.document||!r.document.id)throw new Error('Липсва потвърден идентификатор на акцията.');
+        clearPendingCreate(key,payload.create_id);
+        if(!current())return;
+        // CREATE already returns the authorized document. Do not await a full folder LIST.
+        docsRequestRef.current++;setDocsLoading(false);
+        setDocs(old=>[r.document,...old.filter(d=>d.id!==r.document.id)]);
+        try{
+          const cache=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'[]');
+          const previous=Array.isArray(cache)?cache:[];
+          localStorage.setItem(localCacheKey('docs'),JSON.stringify([r.document,...previous.filter(d=>d.id!==r.document.id)]));
+        }catch(ignore){}
+        selectExistingDocument(r.document.id);setCreating(false);
+        // The LOG shell becomes usable immediately after acknowledged creation;
+        // its existing full READ populates actual server values without blocking LIST.
+        await startSession(r.document,r.bootstrap);
+      }catch(e){
+        if(['bvlog_invalid','bvlog_invalid_date'].includes(e.code))clearPendingCreate(key,payload.create_id);
+        if(current())setError(e.message+(createPendingRef.current?' · Опитай отново със същата заявка; не създавай дубликат.':''));
+      }finally{createFlightRef.current=false;setBusy(false);}
     }
     async function enqueue(op) {
       const item=Object.assign({op_id:uuid(),state:'pending',created:new Date().toISOString(),author:ANONYMOUS ? operatorName.trim() : ((authRef.current && authRef.current.name) || (CFG.user && CFG.user.name || ''))},op);
@@ -716,6 +1099,7 @@
       try {
         item.doc_name=item.doc_name || (docRef.current && docRef.current.id===item.doc_id ? docRef.current.name : (docs.find(d=>d.id===item.doc_id)||{}).name) || '';
         await database('put','queue',item);
+        if(item.state==='pending')requestBackgroundSync();
       }catch(e){setLocalStoreError(B('NE e zapazeno: ')+e.message);return false;}
       // A failed UI refresh does not undo a durable IndexedDB commit.
       try {
@@ -823,11 +1207,16 @@
         (CFG.auth_mode!=='public' && (!authRef.current||authRef.current.offline_only)))return;
       const scope=DB;
       syncingRef.current=true;
+      const leaseOwner=uuid();
+      let hasLease=false;
       try {
+        hasLease=await syncLease(leaseOwner,false,scope);
+        if(!hasLease)return;
         const items=(await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
         let touchedCurrent=false;
         for(const o of items){
           if(DB!==scope)return;
+          if(!await syncLease(leaseOwner,false,scope))return;
           if(!['pending','sending'].includes(o.state)||o.kind==='audio')continue;
           if(o.next_retry && Date.now()<Date.parse(o.next_retry))continue;
           const work=Object.assign({},o,{state:'sending',upload_started:new Date().toISOString()});
@@ -838,6 +1227,7 @@
             const payload=Object.assign({},o);
             for(const key of ['state','audio','error','created','current','mic_signal','quality',
               'blob','preview_blob','blob_media_id','preview_blob_media_id',
+              'attempts','next_retry','upload_started',
               'blob_size','preview_blob_size','blob_mime','preview_blob_mime','parts_done'])delete payload[key];
             let r;
             if(o.kind==='audio_upload'){
@@ -856,18 +1246,27 @@
               const acknowledged=Math.max(0,Math.min(total,Math.floor(Number(o.parts_done)||0)));
               const startPart=acknowledged>=total?total-1:acknowledged;
               for(let part=startPart;part<total;part++){
-                if(DB!==scope)return;
+                if(DB!==scope||!await syncLease(leaseOwner,false,scope))return;
                 const piece=blob.slice(part*262144,(part+1)*262144);
                 const response=await api('audio','POST',{doc_id:o.doc_id,op_id:o.op_id,
                   target_id:o.target_id,target_kind:o.target_kind,mime:o.mime,
                   field_sheet:o.field_sheet,field_row:o.field_row,field_col:o.field_col,
-                  part_index:part,part_count:total,base64:await photoBase64(piece)});
-                if(!response.ok)throw new Error(response.message||'Неуспешно качване на аудиото.');
-                work.parts_done=part+1;
+                  part_index:part,part_count:total,sequential:true,base64:await photoBase64(piece)});
+                if(DB!==scope)return;
+                if(!response.ok){
+                  if(['busy','waiting_for_log','incomplete_upload'].includes(response.code)){r=response;break;}
+                  const failure=new Error(response.message||'Неуспешно качване на аудиото.');
+                  failure.retryable=false;failure.code=response.code;throw failure;
+                }
+                const missing=Number.isInteger(response.next_part)&&response.next_part>=0&&response.next_part<total;
+                // Legacy GAS may report its first missing piece after every chunk;
+                // only a non-complete final ACK may rewind this sequential client.
+                work.parts_done=part===total-1&&!response.complete&&missing?response.next_part:part+1;
                 await database('put','queue',work);
                 if(response.complete){completed=true;break;}
+                if(part===total-1&&!response.complete)break;
               }
-              r={ok:completed,code:completed?'':'incomplete_upload',
+              r=r||{ok:completed,code:completed?'':'incomplete_upload',
                 message:completed?'':'Аудиото още не е потвърдено в Google Drive.'};
             }else if(o.kind==='photo'){
               if(o.log_op_id){
@@ -881,6 +1280,7 @@
               let preview=await queueBlob(o,'preview_blob');
               if(!preview){
                 const recovered=await preparePhoto(blob);
+                if(DB!==scope)return;
                 preview=recovered.previewBlob;
                 const saved=await database('put','queue',Object.assign({},work,{preview_blob:preview}));
                 Object.assign(work,saved);
@@ -891,6 +1291,7 @@
             }else{
               r=await api('operation','POST',payload);
             }
+            if(DB!==scope)return; // An identity switch must never write to the new user's queue.
             if(r.ok){
               work.state='synced';work.error='';work.url=r.url||'';
               delete work.blob;delete work.preview_blob;delete work.next_retry;
@@ -898,14 +1299,26 @@
             }else if(['waiting_for_log','busy','incomplete_upload'].includes(r.code)){
               work.state='pending';work.error=r.message||'Изчаква се потвърждение.';
               work.attempts=(work.attempts||0)+1;
-              work.next_retry=new Date(Date.now()+10000).toISOString();
+              if(work.attempts>=MAX_TRANSIENT_WRITE_ATTEMPTS){
+                work.state='error';work.error='Автоматичните опити са изчерпани. Използвай ръчен Retry.';
+                delete work.next_retry;
+              }else work.next_retry=new Date(Date.now()+10000).toISOString();
             }else if(r.code==='conflict'||r.code==='row_moved'){
               work.state=o.kind==='photo'?'error':'conflict';work.current=r.current;work.error=r.message;
             }else{work.state='error';work.error=r.message||B('Greshka pri zapis');}
           }catch(e){
-            work.state='pending';work.error=e.message;
+            if(DB!==scope)return;
+            work.error=e.message;
             work.attempts=(work.attempts||0)+1;
-            work.next_retry=new Date(Date.now()+Math.min(600000,5000*Math.pow(2,Math.min(work.attempts-1,6)))).toISOString();
+            if(isTransientRequestError(e)&&work.attempts<MAX_TRANSIENT_WRITE_ATTEMPTS){
+              work.state='pending';
+              work.next_retry=new Date(Date.now()+writeRetryDelayMs(work.attempts)).toISOString();
+            }else{
+              work.state='error';
+              if(work.attempts>=MAX_TRANSIENT_WRITE_ATTEMPTS)
+                work.error='Автоматичните опити са изчерпани: '+work.error;
+              delete work.next_retry;
+            }
             try{await database('put','queue',work);}
             catch(localError){
               setError('Неуспешно локално запазване на опашката: '+localError.message);
@@ -919,35 +1332,63 @@
         }
         await refreshQueue();
         // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
-        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id);
+        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id,false,undefined,true);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
            (op.kind==='photo'&&(!op.log_op_id||latest.some(x=>x.op_id===op.log_op_id&&x.state==='synced')))||
            (op.kind==='audio_upload'&&latest.some(x=>x.op_id===op.target_id&&x.state==='synced'))));
         if(ready)window.setTimeout(()=>syncAll(),650);
+        scheduleWriteRetry(latest);
+        if(latest.some(o=>o.state==='pending'&&o.kind!=='audio'))requestBackgroundSync();
         setSyncError('');
       }catch(e){setSyncError('Синхронизация: '+e.message);}
-      finally{syncingRef.current=false;}
+      finally{
+        if(hasLease)try{await syncLease(leaseOwner,true,scope);}catch(e){setLocalStoreError('Заключване на опашката: '+e.message);}
+        syncingRef.current=false;
+      }
     }
     useEffect(()=>{
       // Recover interrupted uploads in the same user queue without changing their UUIDs.
       // syncAll retries 'sending' as well as 'pending', but only after the page is reopened.
       if(CFG.auth_mode==='public'){
         try {const arr=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'null');
-          if(Array.isArray(arr)){setDocs(arr);setSelectedDoc(arr[0]?arr[0].id:'');}
+          if(Array.isArray(arr)){
+            setDocs(arr);if(!selectedDocManualRef.current){
+              selectedDocRef.current=arr[0]?arr[0].id:'';setSelectedDoc(selectedDocRef.current);
+            }
+          }
         } catch(e) { /* ignore invalid cache */ }
-        refreshQueue();loadDocs();
+        restorePendingCreate();refreshQueue();loadDocs();requestBackgroundSync();
       }
       if ('serviceWorker' in navigator && CFG.sw_url && window.isSecureContext) {
-        navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()}).catch(()=>{});
+        navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()})
+          .then(reg=>{setBackgroundSyncAvailable(!!(reg.sync&&reg.sync.register));requestBackgroundSync();})
+          .catch(()=>setBackgroundSyncAvailable(false));
       }
-      const connection=()=>{setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {loadDocs();syncAll();processAudioQueue();}};
-      const visibility=()=>{if (!document.hidden&&navigator.onLine){syncAll();processAudioQueue();}};
+      const connection=()=>{if(navigator.onLine)requestBackgroundSync();setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {
+        loadDocs();syncAll();processAudioQueue();
+        const refresh=refreshRef.current;
+        if(readRetryRef.current.id)scheduleReadRetryTimer();
+        else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
+          !documentReadInFlightRef.current)refresh.load(refresh.id);
+      }};
+      const visibility=()=>{
+        if(document.hidden){requestBackgroundSync();return;}
+        if(navigator.onLine){syncAll();processAudioQueue();scheduleReadRetryTimer();}
+      };
+      const swUpdated=event=>{
+        if(event.data&&event.data.type==='BVLOG_SYNC_UPDATED'){
+          refreshQueue();
+          const refresh=refreshRef.current;
+          if(refresh&&refresh.ready&&!documentReadInFlightRef.current)refresh.load(refresh.id);
+        }
+      };
+      if(navigator.serviceWorker)navigator.serviceWorker.addEventListener('message',swUpdated);
       window.addEventListener('online',connection);window.addEventListener('offline',connection);
       document.addEventListener('visibilitychange',visibility);
       const timer=window.setInterval(()=>{if(navigator.onLine){syncAll();processAudioQueue();}},45000);
-      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);clearInterval(timer);};
+      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);if(navigator.serviceWorker)navigator.serviceWorker.removeEventListener('message',swUpdated);clearInterval(timer);clearReadRetry();if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);};
     },[]);
 
     // Keep the timer stable across queue state changes and UI re-renders.
@@ -972,7 +1413,7 @@
       return()=>window.clearInterval(timer);
     },[mode,doc&&doc.id,online]);
 
-    function closeSession() { if(recording)return;documentRequestRef.current++;setDocLoading(false);setDocLoadError('');setLastFreshAt('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    function closeSession() { if(recording||fieldRecording)return;clearReadRetry();documentRequestRef.current++;documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;setDocLoading(false);setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
@@ -1039,15 +1480,26 @@
       }
     }
     async function uploadExistingPhoto(entry,files) {
+      if(!doc||!entry||!Array.isArray(entry.cells))return;
+      const targetDoc={id:doc.id,name:doc.name};
+      const selected=Array.from(files||[]).slice(0,3);
+      if(!selected.length)return;
+      setPhotoBusy(true);
       try {
-        if(!doc)return;
-        for(const file of Array.from(files||[]).slice(0,3)){
+        let saved=0;
+        for(const file of selected){
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
           const image=await preparePhoto(file);
-          await enqueue({kind:'photo',doc_id:doc.id,doc_name:doc.name,
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
+          const ok=await enqueue({kind:'photo',doc_id:targetDoc.id,doc_name:targetDoc.name,
             target_row:entry.row,expected_time:entry.cells[1],expected_text:entry.cells[3],
             blob:image.blob,preview_blob:image.previewBlob,filename:image.name,mime:image.mime});
+          if(!ok)throw new Error('Снимката не е запазена локално.');
+          saved++;
         }
+        if(saved)setNotice('Снимките са запазени локално за изпращане.');
       }catch(e){setError(e.message);}
+      finally{setPhotoBusy(false);}
     }
     function canDiscardInterruptedAudio(o){
       return o && o.kind==='audio_upload' && o.state==='sending' &&
@@ -1387,6 +1839,7 @@
         return;
       }
       await database('put','queue',newer);await refreshQueue();
+      if(newer.state==='pending')requestBackgroundSync();
     }
     function voiceDraft(o) {
       return Object.prototype.hasOwnProperty.call(voiceReviewDrafts,o.op_id)?
@@ -1531,13 +1984,27 @@
         });
       }catch(e){setAudioPlayerMessage('Натисни Play, за да прослушаш аудиото.');}
     },[audioPlayer && audioPlayer.url]);
-    async function playRemoteAudio(entry){
+    async function playRemoteAudio(entry,forceFull=false){
       if(!doc || !entry.audio || !entry.audio.id)return;
       const id=entry.audio.id,cacheKey=doc.id+':'+id;
       // Cancelling a download must not overwrite a newer player's state.
       closeAudioPlayer();
       const cached=audioBlobCacheRef.current.get(cacheKey);
       if(cached){showAudioBlob(cached,'Оригинално аудио');return;}
+      if(!forceFull&&navigator.onLine){
+        try{
+          const streamUrl=new URL(CFG.api+'audio-stream',location.href);
+          if(streamUrl.origin===location.origin){
+            streamUrl.searchParams.set('doc_id',doc.id);
+            streamUrl.searchParams.set('audio_id',id);
+            // Google mode uses its existing HttpOnly session cookie. WP REST
+            // requires the current nonce for native media requests.
+            if(CFG.nonce&&CFG.user&&CFG.user.id)streamUrl.searchParams.set('_wpnonce',CFG.nonce);
+            setAudioPlayer({url:streamUrl.href,label:'Оригинално аудио',streamEntry:entry});
+            setAudioPlayerMessage('');setAudioLoadingMessage('');return;
+          }
+        }catch(ignore){/* Use the compatible authenticated full download. */}
+      }
       const task=++audioSequenceRef.current;
       const controller=new AbortController();audioFetchRef.current=controller;
       setAudioBusy(id);setAudioPlayer({url:'',label:'Зареждане на оригиналното аудио'});
@@ -1633,7 +2100,7 @@
     return h('div',{className:'bv-shell '+((audioPlayer||audioBusy)?'bv-has-audio':'')},
       h('header',{className:'bv-header'},
         h('div',{className:'bv-brand'},h('span',{className:'bv-brand-icon'},h('img',{src:CFG.logo_url||'',alt:'СКБ'})),
-          h('div',null,h('strong',null,'Документ за координация на акция'),h('small',null,'Спасителен клуб за бъдеще'),
+          h('div',null,h('strong',{className:'bv-brand-title'},'Документ за Координация на Акция'),h('small',null,'Спасителен клуб за бъдеще'),
             h('small',{className:'bv-build-id',title:'Running JavaScript build (not the HTML-configured version)'},
               'WP '+(CFG.plugin_version||'?')+' / JS '+BVLOG_RUNNING_BUILD))),
         h('div',{className:'bv-top-controls'},
@@ -1659,8 +2126,9 @@
         (audioPlayer && audioPlayer.url)
           ?h('div',{className:'bv-audio-dock-actions'},
             h('audio',{ref:audioElementRef,src:audioPlayer.url,controls:true,preload:'metadata',
-              onError:()=>setAudioPlayerMessage('Този аудиоформат не може да се възпроизведе в браузъра.')}),
-            h('button',{type:'button',onClick:stopAudioPlayback,className:'bv-audio-stop'},icon('stop',17),' Стоп'))
+              onError:()=>setAudioPlayerMessage(audioPlayer.streamEntry?'Стриймингът не е достъпен. Опитай цялостно изтегляне.':'Този аудиоформат не може да се възпроизведе в браузъра.')}),
+            h('button',{type:'button',onClick:stopAudioPlayback,className:'bv-audio-stop'},icon('stop',17),' Стоп'),
+            audioPlayer.streamEntry&&h('button',{type:'button',onClick:()=>playRemoteAudio(audioPlayer.streamEntry,true)},'Цялостно изтегляне'))
           :h('div',{className:'bv-audio-loading'},h('span',null,audioLoadingMessage||'Зарежда се...'),
             h('button',{type:'button',onClick:closeAudioPlayer},'Откажи')),
         audioPlayerMessage&&h('small',{className:'bv-audio-message'},audioPlayerMessage)),
@@ -1671,7 +2139,8 @@
           h('h1',null,'Документ за координация на акция'),
           h('p',null,'Влез с одобрен Google акаунт, без WordPress регистрация.'),
           CFG.google_client_id ? h('div',{id:'bvlog-google-signin'}) : h('p',{className:'bv-banner error'},'Администраторът трябва да настрои Google OAuth Client ID.'),
-          loginError&&h('p',{className:'bv-banner error'},loginError))) :
+          loginError&&h('p',{className:'bv-banner error'},loginError),
+          loginError&&h(Button,{secondary:true,onClick:checkAuth,disabled:authLoading||!online},'Опитай отново'))) :
       !auth && CFG.auth_mode==='wordpress' ? h('main',{className:'bv-content'},h('div',{className:'bv-card'},
         'Необходим е WordPress вход.', h('a',{href:'/wp-login.php?redirect_to='+encodeURIComponent(location.href)},'Вход'))) :
       mode==='choose' ? h('main',{className:'bv-content'},
@@ -1685,22 +2154,48 @@
           docsError&&h('div',{className:'bv-load-error',role:'alert'},
             'Списъкът с акции не е обновен: '+docsError,
             h('button',{type:'button',onClick:loadDocs,disabled:docsLoading},'Опитай отново')),
-          docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>setSelectedDoc(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
+          docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>selectExistingDocument(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
-          h(Button,{disabled:!selectedDoc,onClick:()=>startSession(docs.find(d=>d.id===selectedDoc))},icon('arrow',18),' ',B('Otvori aktsiyata'))),
+          docs.length&&h('small',{className:'bv-doc-folder-hint'},'Всички показани таблици са от папката — независимо от името.'),
+          h(Button,{disabled:busy||!selectedDoc,onClick:()=>{
+            const chosen=docs.find(d=>d.id===selectedDocRef.current && d.id===selectedDoc);
+            if(!chosen){setDocsError('Избраната акция е променена или липсва. Избери я отново.');return;}
+            startSession(chosen);
+          }},icon('arrow',18),' ',B('Otvori aktsiyata'))),
         h('div',{className:'bv-or'},B('ILI')),
         h('div',{className:'bv-card'},
-          h('button',{className:'bv-row spread bv-switch',onClick:()=>{if(!creating)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
+          h('button',{className:'bv-row spread bv-switch',disabled:busy,onClick:()=>{if(!creating&&!pendingCreate)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
           creating&&h('div',{className:'bv-form'},
-            h('label',null,B('Tip aktsiya'),h('select',{value:newType,onChange:e=>{setNewType(e.target.value);setCreateId(uuid());},className:'bv-input'},actionTypes.map(v=>h('option',{key:v,value:v},v)))),
-            h('label',null,B('Naseleno myasto'),h('input',{className:'bv-input',value:newPlace,maxLength:100,placeholder:B('napr. gr. Samokov'),onChange:e=>{setNewPlace(e.target.value);setCreateId(uuid());}})),
+            h('label',null,B('Tip aktsiya'),h('select',{value:newType,disabled:busy||!!pendingCreate,onChange:e=>setNewType(e.target.value),className:'bv-input'},Array.from(new Set([...(pendingCreate?[pendingCreate.type]:[]),...actionTypes])).map(v=>h('option',{key:v,value:v},v)))),
+            h('label',null,B('Naseleno myasto'),h('input',{className:'bv-input',value:newPlace,maxLength:100,placeholder:B('napr. gr. Samokov'),disabled:busy||!!pendingCreate,onChange:e=>setNewPlace(e.target.value)})),
             h('label',null,'Дата на акцията',h('input',{className:'bv-input',type:'date',value:incidentDate,
-              onChange:e=>{setIncidentDate(e.target.value);setCreateId(uuid());},required:true})),
+              onChange:e=>setIncidentDate(e.target.value),disabled:busy||!!pendingCreate,required:true})),
             h('div',{className:'bv-preview'},B('Ime na dokumenta')+': ',(incidentDate||'YYYY-MM-DD').replaceAll('-','.'),' - ',B('DKA'),' - ',newType,' - ',newPlace||'...'),
-            h(Button,{disabled:busy||!newPlace.trim()||!isIncidentDate(incidentDate)||!online,onClick:newDocument},busy?B('Sqzdava se...'):B('Sqzday i otvori')))),
+            pendingCreate&&h('p',{className:'bv-muted',role:'status'},'Има започната заявка. Повтори безопасно същата акция, докато получиш потвърждение.'),
+            h(Button,{disabled:busy||(!pendingCreate&&(!newPlace.trim()||!isIncidentDate(incidentDate)))||!online,onClick:newDocument},busy?B('Sqzdava se...'):pendingCreate?'Провери / повтори създаването':B('Sqzday i otvori')))),
         !online&&h('div',{className:'bv-card bv-offline-last'},h('p',null,B('Oflayn: mozhe da prodqlzhish poslednata aktsiya.')),
           h(Button,{secondary:true,onClick:()=>{try{const d=JSON.parse(localStorage.getItem(localCacheKey('last-doc'))||'null');if(d)startSession(d);}catch(e){}}},B('Posledna aktsiya'))),
-        queueAccessible&&h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж')
+        queueAccessible&&h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж'),
+        !installedPwa&&h('section',{className:'bv-install-footer','aria-label':'Инсталиране на приложението'},
+          h('button',{type:'button',className:'bv-install-btn',onClick:installOnPhone,
+            'aria-label':'Инсталирай приложението на телефона',title:'Инсталирай приложението на телефона',
+            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},
+            h('span',{className:'bv-install-glyph','aria-hidden':'true'},
+              // Google Material Icons, install_mobile (Rounded), Apache-2.0.
+              // Original geometry, SKB colors. See THIRD_PARTY_NOTICES.txt.
+              h('svg',{width:28,height:28,viewBox:'0 0 24 24',fill:'currentColor',focusable:'false'},
+                h('path',{d:'M17,18H7V6h7V1H7C5.9,1,5,1.9,5,3v18c0,1.1,0.9,2,2,2h10c1.1,0,2-0.9,2-2v-5h-2V18z'}),
+                h('path',{d:'M18.71,13.29l3.59-3.59c0.39-0.39,0.39-1.02,0-1.41l0,0c-0.39-0.39-1.02-0.39-1.41,0L19,10.17V4c0-0.55-0.45-1-1-1h0 c-0.55,0-1,0.45-1,1v6.17l-1.89-1.88c-0.39-0.39-1.02-0.39-1.41,0l0,0c-0.39,0.39-0.39,1.02,0,1.41l3.59,3.59 C17.69,13.68,18.32,13.68,18.71,13.29z',className:'bv-install-accent'}))),
+            h('span',{className:'bv-install-label'},'Инсталирай')),
+          installStatus&&h('p',{className:'bv-install-status',role:'status'},installStatus),
+          installHelpOpen&&h('div',{id:'bvlog-install-help',className:'bv-install-help',role:'region',
+            'aria-label':'Инструкции за инсталиране'},
+            iosInstallDevice() ?
+              h('p',null,'На iPhone/iPad: отвори страницата в Safari, натисни „Споделяне“ (Share), избери „Добави към началния екран“ (Add to Home Screen), включи „Отваряне като приложение“ ако се показва и натисни „Добави“.') :
+              androidInstallDevice() ?
+                h('p',null,'На Android: отвори страницата в Chrome, натисни менюто ⋮, после „Инсталиране на приложението“ или „Добавяне към началния екран“. Ако опцията липсва, провери дали сайтът е отворен през HTTPS в браузър.') :
+                h('p',null,'Отвори приложението на телефона. В Android Chrome избери ⋮ → Инсталиране; на iPhone Safari избери Споделяне → Добави към началния екран.'),
+            h('button',{type:'button',className:'bv-install-help-close',onClick:()=>setInstallHelpOpen(false)},'Скрий инструкциите')))
       ) : h('main',{className:'bv-content bv-session'},
         h('div',{className:'bv-action-top'},
           h('div',null,h('span',{className:'bv-kicker'},B('AKTIVNA AKTSIYA')),h('h1',null,title),
@@ -1710,14 +2205,15 @@
           h('div',{className:'bv-action-buttons'},
             h('div',{className:'bv-fresh-label',role:'status'},
               !online?'Офлайн копие':docLoadError?'Обновяването е неуспешно':
-              docLoading?'Обновяване...':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
-              h('small',null,'Автоматично: на 2 мин. при безопасни условия')),
+              docLoading?(cachedView?'Кеширани данни · обновяване...':'Обновяване...'):
+                cachedView?'Локално копие · не е обновено':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
+              h('small',null,page+' · автоматично: на 2 мин. при безопасни условия')),
             h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
               title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
             h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
         h('nav',{className:'bv-tabs','aria-label':'Tabs'},[
           ['LOG','list',B('Zhurnal')],['INFO','info',B('Info')],['TECH','truck',B('Tehnika')],['TEAM','users',B('Ekip')]
-        ].map(x=>h('button',{key:x[0],className:page===x[0]?'selected':'',onClick:()=>{if(!recording){setPage(x[0]);setEditing(null);}}},icon(x[1],19),h('span',null,x[2])))),
+        ].map(x=>h('button',{key:x[0],className:page===x[0]?'selected':'',onClick:()=>switchTab(x[0])},icon(x[1],19),h('span',null,x[2])))),
         data&&Array.isArray(data.MISSING_TABS)&&data.MISSING_TABS.length>0&&
           h('div',{className:'bv-banner error',role:'alert'},
             'Липсващи листове в Google Sheets: '+data.MISSING_TABS.join(', ')+
@@ -1762,13 +2258,11 @@
               h('textarea',{value:draft,onChange:e=>setDraft(e.target.value),rows:2,maxLength:3000,placeholder:B('Vqvedi sqbitie...')}),
               h('button',{onClick:submitText,disabled:!draft.trim(),title:B('Zapishi')},icon('arrow',20)))),
           h('div',{className:'bv-photo-tools'},
-            h('label',{className:'bv-photo-pick'},icon('image',17),' Качи снимка',
-              h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
-            h('label',{className:'bv-photo-pick'},icon('camera',17),' Снимай',
-              h('input',{type:'file',accept:'image/*',capture:'environment',onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+            h(PhotoSourcePicker,{disabled:photoBusy,onFiles:onSelectPhotos}),
             photoBusy&&h('small',null,'Обработва снимката...'),
             photos.length>0&&h('button',{className:'bv-photo-pick',onClick:submitPhotoOnly},icon('upload',16),' Запиши само снимка'),
-            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},p.name,
+            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},
+              p.previewSrc&&h('img',{className:'bv-photo-chip-preview',src:p.previewSrc,alt:'Преглед на снимка'}),p.name,
               h('button',{title:'Премахни снимката',onClick:()=>setPhotos(q=>q.filter((_,j)=>j!==i))},icon('close',13))))),
           h('div',{className:'bv-section-head'},h('h3',null,B('Posledni sqbitiya')),
             h('button',{className:'bv-icon-btn',onClick:()=>loadDocument(doc.id),title:B('Obnovi')},icon('refresh',18))),
@@ -1784,11 +2278,12 @@
                 return h('div',{className:'bv-event bv-local-event',key:item.key},
                   h('span',{className:'bv-event-time'},timeOf(o.event_at||o.created)),
                   h('div',{className:'bv-event-body'},
-                    h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
+                    h('div',{className:'bv-event-main'},h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
                     o.state==='synced'?
                       h('span',{className:'bv-status wait'},icon('refresh',14),
                         'Записано в Google · очаква опресняване'):
-                      h(EntryStatus,{status:o.state}),
+                      h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
+                    h('div',{className:'bv-event-controls'},
                     (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
                     playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
                       icon('play',15),' Чуй оригинала'),
@@ -1799,7 +2294,7 @@
                     o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{
                       await database('put','queue',Object.assign({},o,{state:'pending'}));
                       await refreshQueue();syncAll();
-                    }},'Повтори изпращането')));
+                    }},'Повтори изпращането'))));
               }
               const x=item.remote;
               const c=x.cells,divider=String(c[3]||'').startsWith('ДАТА:');
@@ -1808,19 +2303,18 @@
               return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:item.key},
                 h('span',{className:'bv-event-time'},c[1]||'--:--'),
                 h('div',{className:'bv-event-body'},
-                  h('strong',null,c[3]||''),
+                  h('div',{className:'bv-event-main'},h('strong',null,c[3]||''),
                   h('small',null,(cancelled?'АНУЛИРАНО · ':'')+(c[2]||'')+(c[4]?' | '+c[4]:'')),
                   !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
-                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано'),
-                  h('div',{className:'bv-event-photos'},
+                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано')),
+                  h('div',{className:'bv-event-controls'},h('div',{className:'bv-event-photos'},
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
                       icon('image',16),' Снимки (',(x.photos||[]).length,')'),
                     x.audio&&h('button',{type:'button',className:'bv-photo-indicator',
                       disabled:audioBusy===x.audio.id,onClick:()=>playRemoteAudio(x)},icon('play',15),
                       audioBusy===x.audio.id?' Зарежда аудиото...':' Чуй оригинала'),
-                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' Прикачи снимка',
-                      h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h(PhotoSourcePicker,{compact:true,disabled:photoBusy,onFiles:files=>uploadExistingPhoto(x,files)}),
                     !cancelled&&h('button',{type:'button',className:'bv-event-menu-button',
                       'aria-label':'Действия за събитието','aria-expanded':eventMenu===x.row,
                       onClick:()=>setEventMenu(eventMenu===x.row?null:x.row)},icon('more',20))),
@@ -1831,7 +2325,7 @@
                     h('button',{type:'button',onClick:()=>setExpandedHistory(expandedHistory===x.row?null:x.row)},
                       'История на промените ('+x.history.length+')'),
                     expandedHistory===x.row&&x.history.map((v,i)=>h('small',{key:i},
-                      (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||''))))));
+                      (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||'')))))));
             }),
             data&&!journalFeed.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
 
@@ -1861,7 +2355,7 @@
 
         ) : h('section',{className:'bv-form-screen'},
           h('div',{className:'bv-row spread'},h('h2',null,page==='TEAM'?B('Uchastnitsi'):B('Tehnika')),
-            h(Button,{secondary:true,onClick:()=>{setRowAdd(!rowAdd);setRowFields([]);}},icon('plus',17),' ',B('Nov red'))),
+            h(Button,{secondary:true,disabled:!rowAdd&&(!data||!Array.isArray(data[page])||(data.MISSING_TABS||[]).includes(page)),onClick:()=>{setRowAdd(!rowAdd);setRowFields([]);}},icon('plus',17),' ',B('Nov red'))),
           rowAdd&&h('div',{className:'bv-card bv-new-row'},
             (page==='TEAM'?['Dve imena','Telefon','Transport','Momentna lokatsiya','Predvaritelen chas','Realno pristigane','Priklyuchvane']:['Avtomobili i ekipirovka','Broi','Otgovornik','Informatsiya']).map((label,i)=>h('label',{key:i},B(label),h('input',{className:'bv-input',value:rowFields[i]||'',onChange:e=>setRowFields(old=>{const x=old.slice();x[i]=e.target.value;return x;})}))),
             h(Button,{disabled:rowSaving||!rowFields.some(v=>v&&v.trim()),onClick:async()=>{
@@ -1894,7 +2388,7 @@
         h('h3',null,B('Operatsii za proverka')),
         myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
           !isLocalJournalOp(o,doc&&doc.id)).map(o=>h('div',{className:'bv-card',key:o.op_id},
-          h(EntryStatus,{status:o.state}),
+          h(EntryStatus,{status:o.state,retryAt:o.next_retry}),
           h('p',{className:'bv-muted'},'Акция: '+queueTarget(o)+(o.target&&o.target.kind==='field'?' · '+(o.target.sheet||'')+' '+(o.target.col||'')+(o.target.row||''):'')),
           h('p',null,o.kind==='field'?(o.sheet+' '+o.col+o.row+' : '+o.value):o.kind==='audio'?B('Audio zapis ot ')+timeOf(o.event_at):o.error),
           o.state==='conflict'&&h('div',null,
@@ -1915,7 +2409,7 @@
             h('textarea',{className:'bv-textarea',defaultValue:o.transcript||'',placeholder:B('Vqvedi transkriptsiyata tuk...'),id:'audio-'+o.op_id}),
             h(Button,{onClick:()=>{const el=document.getElementById('audio-'+o.op_id);audioToText(o,el?el.value:'');}},B('Zapishi teksta')),
             CFG.stt_mode==='cloud'&&CFG.stt_cloud&&h(Button,{secondary:true,onClick:()=>retryAudio(o)},'Опитай облачно STT')),
-          o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending'}));syncAll();}},B('Opitay otnovo')),
+          o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending',attempts:0,next_retry:null,error:''}));await refreshQueue();syncAll();}},B('Opitay otnovo')),
           ['audio','review','voice_review','conflict','error','local_error'].includes(o.state)&&
             h('button',{type:'button',className:'bv-delete-op',onClick:()=>dropQueued(o),
               'aria-label':'Изтрий непратения запис от '+queueTarget(o)},icon('trash',15),' Изтрий записа')
@@ -1944,7 +2438,9 @@
           h('div',{className:'bv-row spread'},h('h3',null,'Локална опашка — '+waiting+' чакащи'),
             h('button',{className:'bv-icon-btn',onClick:()=>setQueueOpen(false)},icon('close',20))),
           h('p',{className:'bv-muted'},'Всеки запис е свързан с конкретен документ. Синхронизираните записи не могат да се изтрият оттук.'),
-          CFG.auth_mode==='google'&&h('button',{className:'bv-retry-op',onClick:importLegacyQueue},'Импорт на стари записи от v0.2.2'),
+          h('p',{className:'bv-muted'},backgroundSyncAvailable ?
+            'Фоновото изпращане е разрешено, но Android може временно да го спре. Непотвърдените записи остават локално.' :
+            'При заключване или спиране на приложението изпращането ще се възобнови автоматично след отваряне и връзка.'),
           localSaveFailed&&h('div',{className:'bv-unsaved-audio',role:'alert'},
             h('strong',null,'Има незапазено аудио!'),
             h('button',{type:'button',onClick:()=>downloadBlob(unsavedAudio.blob,unsavedAudio.when)},'Изтегли резервно копие'),
@@ -1952,7 +2448,7 @@
           needsReview>0&&h('p',{className:'bv-queue-review-count'},needsReview+' записи изискват проверка'),
           displayedQueue.length===0&&h('p',null,'Няма чакащи операции.'),
           displayedQueue.map(o=>h('div',{className:'bv-queue-card',key:o.op_id},
-            h('div',{className:'bv-row spread'},h('strong',null,queueTarget(o)),h(EntryStatus,{status:o.state})),
+            h('div',{className:'bv-row spread'},h('strong',null,queueTarget(o)),h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
             h('small',null,(o.kind==='field'?o.sheet+' '+o.col+o.row:o.kind==='photo'?'Снимка':o.kind==='audio'?'Аудиозапис':o.kind==='audio_upload'?'Оригинално аудио':o.kind==='log_change'?'Промяна на събитие':o.kind==='log'?'Събитие':o.kind)+' · '+timeOf(o.event_at||o.created)),
             h('p',null,o.kind==='photo'?(o.filename||'Снимка'):o.kind==='audio'?(o.state==='review'||o.state==='voice_review'?(o.transcript||'Провери транскрипцията'):'Аудиофайл'):o.kind==='audio_upload'?'Качва оригиналния запис':(o.text||o.value||o.error||'')),
             o.stt_provider&&h('small',{className:'bv-muted'},'STT: '+o.stt_provider),
@@ -1970,7 +2466,7 @@
               o.error&&h('small',{className:'bv-voice-issue'},'Последна грешка: '+o.error),
               canDiscardInterruptedAudio(o)&&h('button',{className:'bv-delete-op',
                 onClick:()=>dropQueued(o)},'Изтрий прекъснатото аудио'),
-              o.state==='error'&&h('button',{className:'bv-retry-op',onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending'}));await refreshQueue();syncAll();}},'Опитай отново')))),
+              o.state==='error'&&h('button',{className:'bv-retry-op',onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending',attempts:0,next_retry:null,error:''}));await refreshQueue();syncAll();}},'Опитай отново')))),
           completedCount>0&&h('button',{className:'bv-retry-op',onClick:()=>setShowCompletedQueue(v=>!v)},
             showCompletedQueue?'Скрий приключените':'Покажи приключените ('+completedCount+')'),
           h(Button,{secondary:true,onClick:()=>setQueueOpen(false)},'Затвори'))),

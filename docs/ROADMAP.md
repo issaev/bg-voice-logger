@@ -1,11 +1,56 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status (operator report, 2026-11-24):** **v0.7.2.1 deployed in production**, expected WP v0.7.2.1 / JS `0.7.2.1-613947b7e695`. Live build and Apps Script revision have not been independently verified in this update; real iPhone/Sheets acceptance remains open. **v0.8.0 is proposed.**
+> **Current production (operator report, 2026-11-24): WordPress v0.8.2.1.** Expected JS `0.8.2.1-188c8b66fb21`, GAS 0.8.2, STT sar-bg-v1. See production status below. Acceptance pending; historical v0.8.0.1 report superseded.
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
 > **Source of truth for issues:** [GitHub Issues](https://github.com/issaev/bg-voice-logger/issues).
 > **Deployment rule:** no WordPress, Google Apps Script, or Cloudflare production deployment without explicit approval.
+
+## Production status — 2026-11-24
+
+Operator confirmed deployment of the latest **WordPress v0.8.2.1** to production on 2026-11-24. This is an operator-reported installation, not completed acceptance or an independently verified live build.
+
+| Component | Version / status |
+|---|---|
+| WordPress | 0.8.2.1 — operator-reported production |
+| JavaScript | `0.8.2.1-188c8b66fb21` — expected build; verify on real devices |
+| Google Apps Script | 0.8.2 — required/expected backend, live revision not independently verified |
+| Cloudflare STT | `sar-bg-v1` — unchanged code, live health not independently verified |
+
+Source release commit: `3c59f38752c4b7f5b4b3fb5722b20ee8b8ee30ce` ([PR #42](https://github.com/issaev/bg-voice-logger/pull/42), stacked on [PR #41](https://github.com/issaev/bg-voice-logger/pull/41)). [WordPress ZIP](https://github.com/issaev/bg-voice-logger/raw/e23558ac9e99fb268b366e1b927efbb42c8bf4d5/bg-voice-logger-v0.8.2.1.zip) · [GAS/Worker ZIP](https://github.com/issaev/bg-voice-logger/raw/ffd65622ff037ad65531dbc10119357edce23c8d/bg-voice-logger-v0.8.2-code.zip).
+
+**Next gate: acceptance testing.** Freeze feature work; run the full Node/PHP regression suite (investigate the ten inherited failing tests; no claim they are resolved), real Android/iPhone/PWA, Google Sheets/Drive, authentication and identity isolation, offline/retry/duplicate and media integrity, and paired performance tests. Verify actual GAS version and Range behavior. Background sync remains best effort, not guaranteed while locked. The original transient network failure root cause remains unconfirmed. Keep issues open until their acceptance criteria pass. The operator explicitly approved promotion of v0.8.2.1 to `main` as the working baseline on 2026-11-24. [PR #42](https://github.com/issaev/bg-voice-logger/pull/42) records the integration. This approval is not acceptance, certification, or a new deployment action; the status update changes documentation only.
+
+Historical release notes below describe their status at authoring time, not the current production state.
+
+## v0.8.2.1 — WordPress-only icon refinement (operator-reported production; acceptance pending)
+
+Replaces the custom install glyph from v0.8.2 (#40) with the official Google Material Icons Rounded `install_mobile` SVG (Apache-2.0); original geometry, navy/white/red colors, visible “Инсталирай”, existing compact bottom position. No external assets or changes to the install mechanism or IndexedDB. WordPress 0.8.2.1, JS `0.8.2.1-188c8b66fb21`; GAS remains 0.8.2, Cloudflare STT unchanged. If upgrading directly from an older backend, install GAS 0.8.2 first. Deployment has been reported by the operator; source promotion to main is approved. Actual mobile acceptance remains pending.
+
+## v0.8.2 — integrated acceptance candidate (not deployed)
+
+Source branch `feature/v0.8.2-test-candidate`, based on v0.8.1; WordPress and Apps Script `0.8.2`, JS `0.8.2-39896a2667b4`. Cloudflare STT Worker unchanged (sar-bg-v1). No production changes or merge.
+
+- #40: compact SKB-inspired blue/red/white install tile with visible “Инсталирай” label, at the bottom; native prompt/manual instructions and standalone guard retained.
+- #16/#36: optional tab-scoped GAS reads, actual LOG bootstrap from a newly created document after releasing the global write lock (only when within time and size budgets); fallback to normal read on failure. No blocking LIST. Separate per-operator/tab snapshots with cached/fresh label, legacy full-document fallback, abort/scope/request generation protection. Sparse private index lookups use exact keys and bounded range groups; dense/unsupported search falls back to complete index scan. INFO schema and legacy projection share a read. Only chooser action types use a 60s version-keyed cache; CREATE and writes validate live sheets.
+- #36 and #15: batch technical header checks; retain formula protection and idempotency; global write lock wait bounded to 8s, ordinary operation POST 30s, CREATE 45s; normal media budgets retained. CREATE remains duplicate-safe via durable reservation from v0.8.1.
+- Media: sequential 256 KiB audio protocol keeps the existing IDs, part names, sizes, checkpoints and old-client behavior; new clients avoid scanning all parts on intermediate acknowledgments and rewind to the first missing part after an incomplete final ACK. Finalization still checks all parts. New photo preview bytes reused instead of re-downloading them; retry uses stored preview. Existing authenticated Range playback retained.
+- Prior v0.8.1 changes and v0.8.0.1 login fix carried forward. No IndexedDB schema change or credential change. Background Sync remains best effort (#27); guaranteed locked-screen transfer on iOS would require a different architecture.
+
+Verification: JavaScript, service worker and Apps Script parsed in V8; 12 new targeted mocked checks and 9 prior v0.8.1 checks passed. No full PHP/Node suite, physical browser, live Sheets/Drive or production latency benchmark performed here. No speedup percentage claimed. Native background SLA, the original transient-network root cause (#22), actual Drive Range support, inherited test failures and any measurement-driven follow-on work remain acceptance/investigation items. Do not close issues until verified. The operator subsequently approved main integration of v0.8.2.1 as the working baseline before acceptance; historical release notes do not establish current production status.
+
+## v0.8.1 — historical candidate (superseded)
+
+Source branch `feature/v0.8.1-next`, based on operator-reported production v0.8.0.1. WordPress `0.8.1`, JS `0.8.1-dcfac367badc`, Apps Script `0.8.1`; STT Worker unchanged (sar-bg-v1). This is a candidate for acceptance, not an accepted production release.
+
+- #35: bottom icon instead of large install card; native Android prompt/manual iOS instructions/installed gating retained.
+- #37: mobile journal actions occupy the full card width below timestamp and body, both local and confirmed entries; desktop alignment retained.
+- #38: one Add photo button in new/existing LOG entries with explicit camera/gallery choice, native picker gesture, original handlers retained.
+- #36: eliminate blocking folder LIST after confirmed CREATE; pin new incident and load the LOG shell immediately while the existing full read populates data. Persist pending request ID/payload per operator across reload; block concurrent submits and editing uncertain requests. Apps Script reserves the ID before copying; incomplete copies have a unique reserved name and are hidden from incident list; recover the same copy and finish initialization, never recreate an ambiguous/missing confirmed copy blindly. CREATE POST 45s, GAS CREATE lock wait 8s; normal write budgets unchanged. Add sanitized per-phase Google and bridge timings to admin history. No measured speedup yet. Full lazy per-tab reads, caching and backend bootstrap snapshot remain future optimizations pending measurement.
+- No IndexedDB schema change, no new STT Worker logic, no credential changes. No merge or deployment.
+
+Verification: JS and GAS syntax parsed; nine targeted isolated create/picker/layout checks and actual frontend timeout/retry mock passed. ZIP structure/CRC will be checked during packaging. Full Node/PHP suite, real Drive fault/parallel creates, physical Android/iPhone and production performance tests not executed. Do not close issues before acceptance.
 
 ## 1. Goal and non-negotiable priorities
 
@@ -21,7 +66,7 @@ The app maintains the operational record of search-and-rescue incidents. **Corre
 
 ## 2. Proposed release sequence
 
-The operator reports **v0.7.1 → v0.7.2 → v0.7.2.1** successively deployed in production on 2026-11-24. GitHub `main` **has been reconciled to the v0.7.2.1 public source** via merged [PR #14](https://github.com/issaev/bg-voice-logger/pull/14) and [PR #20](https://github.com/issaev/bg-voice-logger/pull/20); these merges did not deploy the website. A deployment report is not full end-to-end acceptance. v0.8.0 remains proposed.
+The operator reports **v0.7.1 → v0.7.2 → v0.7.2.1** successively deployed in production on 2026-11-24. GitHub `main` **has been reconciled to the v0.7.2.1 public source** via merged [PR #14](https://github.com/issaev/bg-voice-logger/pull/14) and [PR #20](https://github.com/issaev/bg-voice-logger/pull/20); these merges did not deploy the website. A deployment report is not full end-to-end acceptance. The subsequent integrated v0.8.0 and WordPress-only v0.8.0.1 login hotfix are now operator-reported in production; see current status above.
 
 | Proposed release | Objective | Required work / tickets | Exit criteria |
 | --- | --- | --- | --- |
@@ -30,7 +75,22 @@ The operator reports **v0.7.1 → v0.7.2 → v0.7.2.1** successively deployed in
 | **v0.7.2.1 — Production hotfix (acceptance pending)** | Continuous voice LOG, scoped errors and Google read resilience | [#15](https://github.com/issaev/bg-voice-logger/issues/15), [#17](https://github.com/issaev/bg-voice-logger/issues/17), [#18](https://github.com/issaev/bg-voice-logger/issues/18); [merged PR #20](https://github.com/issaev/bg-voice-logger/pull/20) | Operator-reported deployment; independently verify JS build/GAS revision, iPhone STT→confirmation→upload→Sheets echo, timeouts and safe error history before closing issues |
 | **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7), [#16](https://github.com/issaev/bg-voice-logger/issues/16) GAS read latency profiling; bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
 
-### Production status update — 2026-11-24
+### v0.8.0.1 — current acceptance stage
+
+**Historical production report (superseded): WordPress v0.8.0.1**, expected JS `0.8.0.1-b9391cb399e3`. Source commit `4a7054f10ed1b50817505de8e673f648d7939b83` ([PR #32](https://github.com/issaev/bg-voice-logger/pull/32)); [WordPress package](https://github.com/issaev/bg-voice-logger/raw/efce55ecc83084864e01e23c83d9a2268aaa158a/bg-voice-logger-v0.8.0.1.zip). Expected backend configuration: Apps Script v0.8.0 and Cloudflare STT `sar-bg-v1` ([backend package](https://github.com/issaev/bg-voice-logger/raw/b96a0f3f5cdb815f887056e48f9af60da79caa67/bg-voice-logger-v0.8.0-code.zip)); the report does not independently establish the live backend versions or JS marker. Installation is reported, not acceptance. Full combined Node/PHP, physical mobile login, Sheets/Drive integrity, media and performance verification remain pending. No issues closed and no source merge or deployment performed in this documentation update. Main still holds v0.7.2.1 pending explicit merge approval. #35 is deferred.
+
+| Issues | Status |
+| --- | --- |
+| #2, #3, #5, #6, #8, #9, #10, #12, #15, #17, #18 | Earlier fixes carried forward; verify real end-to-end behavior |
+| #11, #22–#28, #33 | Integrated frontend changes; device and Sheets acceptance pending |
+| #7 | Authenticated native Range playback and fallback implemented; byte identity, access checks and measured first-play remain pending |
+| #16 | PR #21 bounded reads and phase tracing integrated; no measured speedup; caching and tab-level optimizations not complete |
+| #34 | Login challenge hotfix implemented; successful physical mobile sign-in not yet reported |
+| #35 | Deferred to next version; no implementation |
+
+**Next:** comprehensive Work Mode test run on synthetic incidents only; retain the ten historical failing test files as an investigation baseline, not a passing result. No issue closure before evidence.
+
+### Production status update — 2026-11-24 (historical v0.7.1 report)
 
 The operator reports **v0.7.1 deployed in production**, supported by a read-only check of the installed JS and public `/dka/` response:
 
@@ -76,7 +136,25 @@ Acceptance remains open for real iPhone Safari recording/review and refresh beha
 
 **Performance outcome:** count eliminated document requests and report comparable p50/error-rate changes. Do not promise a fixed percentage before measuring.
 
-### v0.8.0 — backend and media changes (needs separate design and approval)
+### v0.8.0 — selected action and best-effort background queue (historical draft; integrated)
+
+Follow-on branch `feature/v0.8.0-stable-selection-background-sync` stacked on retry PR #29, tracks [#11](https://github.com/issaev/bg-voice-logger/issues/11) and [#27](https://github.com/issaev/bg-voice-logger/issues/27).
+
+- **Selection safety:** pinned manual `selectedDocRef` survives stale and overlapping `loadDocs` responses. If the selected Google Sheet disappears, show a visible error and require new explicit selection; do not silently open the newest. Assert exact ID at Open time.
+- **Background Sync:** existing PWA Service Worker processes bounded, individually authenticated, idempotent `log`, `field`, `add_row`, `log_change`, private photo and chunked `audio_upload` operations in the current operator's IndexedDB queue, when browser Background Sync allows. Fetch a fresh session/CSRF/nonce; never persist tokens, media URLs or user IDs in CacheStorage.
+- **Safety/rollback:** per-user atomic lock in a **separate** IndexedDB `bg-voice-logger-sync-leases-v1`, shared with foreground `syncAll`; the existing operational queue schema stays **DB_SCHEMA=2**, compatible with v0.7.2.1 rollback. Reuse `op_id`, `doc_id`, and acknowledged media chunk checkpoints. Skip voice STT in service worker. Notify open clients with a non-sensitive refresh-only message.
+- **Platform reality:** PWA service workers do not guarantee ongoing transfer while screen is locked; iOS Safari lacks the same one-shot Background Sync and uses auto resume on foreground/online. For guaranteed locked-screen transfer a native OS foreground/background service requires separate design.
+- **Verification:** isolated `test-v080-stable-selection.js` and `test-v080-background-sw.js` pass; local test-file suite **27/37 PASS** vs PR #29 baseline **25/35**, with same ten historical failures and no new failing files. No physical Android/iOS or real Google Sheets staging acceptance yet. See [test plan](PLAN_V080_SELECTION_BACKGROUND_BG.md).
+
+Do not deploy or merge automatically; this is a dependent Draft PR on PR #29. PR #21 (GAS profiling) and PR #30 (mobile UI) remain independent.
+
+### v0.8.0 reliability increment — retry/recovery (historical draft; integrated)
+
+A separate frontend retry candidate in `feature/v0.8.0-retry-recovery` addresses [#22](https://github.com/issaev/bg-voice-logger/issues/22) and [#25](https://github.com/issaev/bg-voice-logger/issues/25): three automatic 5/15/30-second retry attempts for transient document reads, bounded and jittered retry for IndexedDB-queued writes with the original `op_id`, capped attempts, visible pending retry state, and safe resume on foreground/online. No new Google Apps Script, PHP or IndexedDB schema. **Actual locked-screen continuous transfer is not guaranteed and remains #27.** This is separate from [Draft PR #21](https://github.com/issaev/bg-voice-logger/pull/21) (GAS profiling).
+
+Local fault injection and regression: **25/35 test files PASS** versus **24/34** main v0.7.2.1, same ten inherited FAIL names, no new failing tests. Browser/Android/iPhone and Google Sheets integration acceptance pending. See [retry/recovery test plan](PLAN_V080_RETRY_BG.md). At the time of that isolated test, production remained v0.7.2.1. The integrated release is now operator-reported deployed; acceptance is still pending.
+
+### v0.8.0 — backend and media changes (integrated initial implementation; benchmarks and further optimization pending)
 
 - [ ] Confirm deployed Apps Script version before changing behavior. The **bundled** `bvlRead` can call `bvlRepairPhotoAnchors_` and potentially change embedded image anchors during a read; verify and remove read-side effects before authenticated read-only benchmark tests.
 - [ ] Reduce unnecessary full-sheet/index/legacy reads; investigate bounded/paginated history and bulk range access. Keep dynamic INFO discovery and write preconditions correct.
