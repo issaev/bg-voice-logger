@@ -7,7 +7,19 @@
 > **Source of truth for issues:** [GitHub Issues](https://github.com/issaev/bg-voice-logger/issues).
 > **Deployment rule:** no WordPress, Google Apps Script, or Cloudflare production deployment without explicit approval.
 
-## v0.8.1 — next candidate (not deployed)
+## v0.8.2 — integrated acceptance candidate (not deployed)
+
+Source branch `feature/v0.8.2-test-candidate`, based on v0.8.1; WordPress and Apps Script `0.8.2`, JS `0.8.2-39896a2667b4`. Cloudflare STT Worker unchanged (sar-bg-v1). No production changes or merge.
+
+- #40: compact SKB-inspired blue/red/white install tile with visible “Инсталирай” label, at the bottom; native prompt/manual instructions and standalone guard retained.
+- #16/#36: optional tab-scoped GAS reads, actual LOG bootstrap from a newly created document after releasing the global write lock (only when within time and size budgets); fallback to normal read on failure. No blocking LIST. Separate per-operator/tab snapshots with cached/fresh label, legacy full-document fallback, abort/scope/request generation protection. Sparse private index lookups use exact keys and bounded range groups; dense/unsupported search falls back to complete index scan. INFO schema and legacy projection share a read. Only chooser action types use a 60s version-keyed cache; CREATE and writes validate live sheets.
+- #36 and #15: batch technical header checks; retain formula protection and idempotency; global write lock wait bounded to 8s, ordinary operation POST 30s, CREATE 45s; normal media budgets retained. CREATE remains duplicate-safe via durable reservation from v0.8.1.
+- Media: sequential 256 KiB audio protocol keeps the existing IDs, part names, sizes, checkpoints and old-client behavior; new clients avoid scanning all parts on intermediate acknowledgments and rewind to the first missing part after an incomplete final ACK. Finalization still checks all parts. New photo preview bytes reused instead of re-downloading them; retry uses stored preview. Existing authenticated Range playback retained.
+- Prior v0.8.1 changes and v0.8.0.1 login fix carried forward. No IndexedDB schema change or credential change. Background Sync remains best effort (#27); guaranteed locked-screen transfer on iOS would require a different architecture.
+
+Verification: JavaScript, service worker and Apps Script parsed in V8; 12 new targeted mocked checks and 9 prior v0.8.1 checks passed. No full PHP/Node suite, physical browser, live Sheets/Drive or production latency benchmark performed here. No speedup percentage claimed. Native background SLA, the original transient-network root cause (#22), actual Drive Range support, inherited test failures and any measurement-driven follow-on work remain acceptance/investigation items. Do not close issues or merge until verified. The previous roadmap sections describe historical releases, not current implementation status.
+
+## v0.8.1 — historical candidate (superseded)
 
 Source branch `feature/v0.8.1-next`, based on operator-reported production v0.8.0.1. WordPress `0.8.1`, JS `0.8.1-dcfac367badc`, Apps Script `0.8.1`; STT Worker unchanged (sar-bg-v1). This is a candidate for acceptance, not an accepted production release.
 
