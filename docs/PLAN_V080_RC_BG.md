@@ -1,3 +1,5 @@
+> Update: v0.8.0 integrated draft now includes PR #21 (GAS) and PR #1 (STT), native audio Range playback with legacy fallback, and audio upload read optimization. The prior notes below are historical. No production deployment or full combined regression run has been performed.
+
 # BG Voice Logger v0.8.0 — интегриран кандидат с инсталиране (Draft)
 
 **Статус: кодът е подготвен, НЕ е публикуван.** Production остава докладваната от оператора v0.7.2.1. Не се прави автоматичен merge, WordPress/GAS deploy, промяна в Cloudflare, изтриване или migration на оперативни данни.

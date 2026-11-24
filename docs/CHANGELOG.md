@@ -1,3 +1,5 @@
+> Update: v0.8.0 integrated draft now includes PR #21 (GAS) and PR #1 (STT), native audio Range playback with legacy fallback, and audio upload read optimization. The prior notes below are historical. No production deployment or full combined regression run has been performed.
+
 ## v0.8.0-A — GAS read profiling and bounded scans (DRAFT, NOT DEPLOYED)
 - Staging-only guarded Apps Script runner and Node comparator; both refuse to print document IDs/cell content. Test workbook must be named `BVLOG_BENCHMARK_*` and explicitly enabled via staging Script Properties.
 - Staging execution not performed; Google Drive connector returned HTTP 429 on a subsequent metadata request. Local suite now 27/37 vs 23/33 baseline; same ten historical failures.

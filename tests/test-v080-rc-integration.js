@@ -45,6 +45,6 @@ assert.ok(plugin.includes('apple-touch-icon'));
 const m=app.match(/const BVLOG_RUNNING_BUILD = '([^']+)';/);
 assert.ok(m);const canonical=app.replace(/const BVLOG_RUNNING_BUILD = '[A-Za-z0-9._-]+';/,
   "const BVLOG_RUNNING_BUILD = '__BUILD_PLACEHOLDER__';");
-const expected='0.7.2.1-'+crypto.createHash('sha256').update(canonical).digest('hex').slice(0,12);
+const expected='0.8.0-'+crypto.createHash('sha256').update(canonical).digest('hex').slice(0,12);
 assert.equal(m[1],expected);
 console.log('PASS v0.8 RC combined: install + UI + stable selection + bounded retry + SW and rollback-safe queue.');
