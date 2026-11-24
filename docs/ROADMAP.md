@@ -7,6 +7,18 @@
 > **Source of truth for issues:** [GitHub Issues](https://github.com/issaev/bg-voice-logger/issues).
 > **Deployment rule:** no WordPress, Google Apps Script, or Cloudflare production deployment without explicit approval.
 
+## v0.8.1 — next candidate (not deployed)
+
+Source branch `feature/v0.8.1-next`, based on operator-reported production v0.8.0.1. WordPress `0.8.1`, JS `0.8.1-dcfac367badc`, Apps Script `0.8.1`; STT Worker unchanged (sar-bg-v1). This is a candidate for acceptance, not an accepted production release.
+
+- #35: bottom icon instead of large install card; native Android prompt/manual iOS instructions/installed gating retained.
+- #37: mobile journal actions occupy the full card width below timestamp and body, both local and confirmed entries; desktop alignment retained.
+- #38: one Add photo button in new/existing LOG entries with explicit camera/gallery choice, native picker gesture, original handlers retained.
+- #36: eliminate blocking folder LIST after confirmed CREATE; pin new incident and load the LOG shell immediately while the existing full read populates data. Persist pending request ID/payload per operator across reload; block concurrent submits and editing uncertain requests. Apps Script reserves the ID before copying; incomplete copies have a unique reserved name and are hidden from incident list; recover the same copy and finish initialization, never recreate an ambiguous/missing confirmed copy blindly. CREATE POST 45s, GAS CREATE lock wait 8s; normal write budgets unchanged. Add sanitized per-phase Google and bridge timings to admin history. No measured speedup yet. Full lazy per-tab reads, caching and backend bootstrap snapshot remain future optimizations pending measurement.
+- No IndexedDB schema change, no new STT Worker logic, no credential changes. No merge or deployment.
+
+Verification: JS and GAS syntax parsed; nine targeted isolated create/picker/layout checks and actual frontend timeout/retry mock passed. ZIP structure/CRC will be checked during packaging. Full Node/PHP suite, real Drive fault/parallel creates, physical Android/iPhone and production performance tests not executed. Do not close issues before acceptance.
+
 ## 1. Goal and non-negotiable priorities
 
 The app maintains the operational record of search-and-rescue incidents. **Correctness and durability outrank speed.** Sequence of work:
