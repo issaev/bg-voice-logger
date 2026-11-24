@@ -2,7 +2,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
 const marker=code.match(/const BVLOG_RUNNING_BUILD = '([^']+)'/)[1];
-assert.match(marker,/^0\.7\.1-[a-f0-9]{12}$/);
+assert.match(marker,/^0\.7\.2-[a-f0-9]{12}$/);
 let output,hook=0;
 const stateNames=Array.from(code.matchAll(/const \[([A-Za-z][A-Za-z0-9]*),\s*set[A-Za-z0-9]+\]=useState\(/g)).map(x=>x[1]);
 const states={};
@@ -20,7 +20,7 @@ const ctx={wp:{element:{createElement:h,useState:init=>{const i=hook++;if(!(i in
 return [states[i],v=>{states[i]=typeof v==='function'?v(states[i]):v;}];},useEffect:()=>{},useRef:v=>({current:v}),
 createRoot:()=>({render:x=>output=x})}},
 window:{BVLOG_CONFIG:{api:'/wp-json/',auth_mode:'google',stt_mode:'cloud',user:{id:0,name:''},
-plugin_version:'0.7.1',expected_build:marker,logo_url:'/logo.webp'},setTimeout},navigator:{onLine:true},
+plugin_version:'0.7.2',expected_build:marker,logo_url:'/logo.webp'},setTimeout},navigator:{onLine:true},
 document:{getElementById:()=>({})},indexedDB:{},localStorage:{getItem:()=>'',setItem:()=>{}},console,setTimeout};
 vm.createContext(ctx);vm.runInContext(code,ctx);
 assert.strictEqual(ctx.window.BVLOG_RUNNING_BUILD,marker);
@@ -39,7 +39,7 @@ assert.ok(nodes.some(n=>n.props.className==='bv-info-col'),'INFO grouping class 
 assert.ok(nodes.some(n=>n.props.className==='bv-sheet-link'&&n.props.href.includes('DOCUMENT_01234567890123')),'Direct link to active Sheet is missing');
 assert.ok(nodes.some(n=>n.type==='button'&&n.children.some(x=>typeof x==='string'&&x.includes('Добави роля'))),'Add INFO role button is missing');
 // With an unexpected server build the UI must clearly show a mismatch.
-ctx.window.BVLOG_CONFIG.expected_build='0.7.1-oldcachebad';
+ctx.window.BVLOG_CONFIG.expected_build='0.7.2-oldcachebad';
 assert.ok(render().some(n=>n.props.role==='alert'),'Build mismatch not visible');
 // Error boundary is present when React's Component is available.
 const wpComponent=class {constructor(props){this.props=props;this.state={};} setState(updater){this.state=Object.assign({},this.state,typeof updater==='function'?updater(this.state):updater);}};
@@ -49,4 +49,4 @@ const reactSource=code.replace('  const ReactComponent=wp.element.Component;',
 assert.ok(code.includes('class BVLOGErrorBoundary extends (ReactComponent||class {})'));
 assert.ok(code.includes('static getDerivedStateFromError(error)'));
 assert.ok(code.includes('this.setState(old=>({error:null,retry:old.retry+1}))'));
-console.log('PASS v0.7.1 UI: INFO columns and audio buttons, numeric cells, running JS build, error boundary.');
+console.log('PASS v0.7.2 UI: INFO columns and audio buttons, numeric cells, running JS build, error boundary.');
