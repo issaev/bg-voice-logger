@@ -99,10 +99,10 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.1'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.2'};
   }
   if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
-  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
+  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id, payload.tab);
   if (action === 'photo_read') return bvlPhotoRead_(folderId, templateId, payload);
   if (action === 'audio_read') return bvlAudioRead_(folderId, templateId, payload);
   if (action === 'create' || action === 'operation') {
@@ -111,15 +111,27 @@ function bvlDispatch_(request) {
     const requestStart=Date.now();
     bvlTrace_(request.request_id,action,'lock_wait_start',requestStart);
     const lock = LockService.getScriptLock();
-    if (!lock.tryLock(action==='create'?8000:25000)) {
+    if (!lock.tryLock(8000)) {
       bvlTrace_(request.request_id,action,'lock_busy',requestStart);
       return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
     }
     bvlTrace_(request.request_id,action,'lock_acquired',requestStart);
+    let result;
     try {
-      if (action === 'create') return bvlCreate_(folderId, templateId, payload, request.request_id);
-      return bvlOperation_(folderId, templateId, payload, request.request_id);
+      result=action==='create'?bvlCreate_(folderId,templateId,payload,request.request_id):
+        bvlOperation_(folderId,templateId,payload,request.request_id);
     } finally { lock.releaseLock(); }
+    // Optional real LOG bootstrap, outside the global write lock. A successful
+    // create must stay successful even if its initial read fails or is too large.
+    if(action==='create'&&result.ok&&payload.bootstrap===true&&!result.deduplicated&&Date.now()-requestStart<8000){
+      try{
+        const started=Date.now(),initial=bvlRead_(folderId,templateId,result.document.id,request.request_id,'LOG');
+        if(initial.ok&&JSON.stringify(initial.data).length<=180000)
+          result.bootstrap={id:initial.id,loaded_tabs:initial.loaded_tabs,data:initial.data};
+        bvlTrace_(request.request_id,'create','create_bootstrap',started,Date.now()-started);
+      }catch(ignore){ /* Client performs its ordinary LOG read. */ }
+    }
+    return result;
   }
   return {ok:false, code:'unsupported_action', message:'Unsupported bridge action.'};
 }
@@ -178,7 +190,7 @@ function bvlList_(folderId, templateId, requestId) {
   }
   files.sort((a,b) => b.created.localeCompare(a.created));
   phase('list_files_loaded');
-  const types=bvlTypeOptions_(templateId);
+  const types=bvlTypeOptions_(templateId,true);
   phase('list_types_loaded');
   return {ok:true, documents:files, action_types:types};
 }
@@ -197,11 +209,14 @@ function bvlCanonicalType_(text) {
   return bvlNorm_(value)===bvlNorm_('\u041d\u0430\u0432\u043e\u0434\u0435\u043d\u0438\u0435') ?
     '\u041d\u0430\u0432\u043e\u0434\u043d\u0435\u043d\u0438\u0435' : value;
 }
-function bvlInfoSections_(sheet) {
-  if(!sheet)return [];
-  const height=Math.min(Math.max(sheet.getLastRow(),45),750);
+function bvlInfoSections_(sheet,options) {
+  if(!sheet){if(options)options.legacy=[];return [];}
+  const lastRow=sheet.getLastRow();
+  const height=Math.min(Math.max(lastRow,45),750);
   const width=Math.min(Math.max(sheet.getLastColumn(),4),15);
   const grid=sheet.getRange(1,1,height,width).getDisplayValues();
+  // INFO legacy projection and adaptive schema use the same server read.
+  if(options)options.legacy=grid.slice(0,Math.min(Math.max(lastRow,34),150)).map(row=>row.slice(0,4));
   const sections=[];
   for(let i=0;i<grid.length;i++) {
     const row=grid[i];
@@ -242,7 +257,7 @@ function bvlInfoSections_(sheet) {
     }
   }
   // Read dropdown rules only for actual action-type rows; avoid large per-cell calls.
-  for(const section of sections)for(const row of section.rows){
+  if(!options||options.includeChoices!==false)for(const section of sections)for(const row of section.rows){
     if(bvlNorm_(row.label)!==bvlNorm_('\u0410\u043a\u0446\u0438\u044f'))continue;
     const f=row.fields[0];
     const rule=sheet.getRange(f.col+row.row).getDataValidation();
@@ -258,14 +273,29 @@ function bvlInfoSections_(sheet) {
   }
   return sections;
 }
-function bvlTypeOptions_(templateId) {
+function bvlTypeOptions_(templateId,useCache) {
+  // Only the chooser may use a short-lived versioned cache; CREATE and every
+  // actual field write always validate the current sheet's dropdown.
+  let cache=null,key='';
+  if(useCache)try{
+    const stamp=DriveApp.getFileById(templateId).getLastUpdated().getTime();
+    if(Number.isFinite(stamp)){
+      key='bvlog-type-v1:'+templateId+':'+stamp;
+      if(key.length<=240){cache=CacheService.getScriptCache();
+        const value=JSON.parse(cache.get(key)||'null');
+        if(Array.isArray(value)&&value.length&&value.every(x=>typeof x==='string'&&x.length<=60))return value;
+      }
+    }
+  }catch(ignore){cache=null;}
   const source=SpreadsheetApp.openById(templateId);
   const info=source.getSheetByName('INFO');
   const first=bvlInfoSections_(info)[0];
   const row=first&&first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f'));
   const menu=row&&row.fields[0]&&row.fields[0].choices || [];
   const placeholder=bvlNorm_('\u0418\u0437\u0431\u0435\u0440\u0438 \u043e\u0442 \u043c\u0435\u043d\u044e\u0442\u043e');
-  return menu.length ? menu.filter(x=>bvlNorm_(x)!==placeholder) : BVL.TYPES.map(bvlCanonicalType_);
+  const types=menu.length ? menu.filter(x=>bvlNorm_(x)!==placeholder) : BVL.TYPES.map(bvlCanonicalType_);
+  if(cache&&key)try{cache.put(key,JSON.stringify(types),60);}catch(ignore){}
+  return types;
 }
 function bvlValidationAwareSet_(range, value) {
   const target=bvlSafeText_(value,3000);
@@ -417,7 +447,8 @@ function bvlCreate_(folderId, templateId, payload, traceId) {
     const info=ss.getSheetByName('INFO'),log=ss.getSheetByName('LOG');
     if(!info||!log||!ss.getSheetByName('TECH')||!ss.getSheetByName('TEAM'))
       throw new Error('The template must contain INFO, LOG, TECH, TEAM tabs.');
-    const first=bvlInfoSections_(info)[0];
+    // The copied cell is validated below against its actual dropdown; no duplicate dropdown reads.
+    const first=bvlInfoSections_(info,{includeChoices:false})[0];
     const action=first&&first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f'));
     if(!action)throw new Error('Template INFO action type row is missing.');
     const valid=bvlValidationAwareSet_(info.getRange(action.fields[0].col+action.row),bvlCanonicalType_(type));
@@ -456,15 +487,19 @@ function bvlPrepare_(ss, needed) {
     const header=name==='LOG'?1:2;
     const technical=name==='LOG'?[['G','BVLOG_ID'],['H','BVLOG_STATUS']]:
       name==='TEAM'?[['I','BVLOG_ID']]:[['F','BVLOG_ID']];
-    for(const pair of technical){
-      const address=pair[0]+header;
-      const current=sh.getRange(address).getDisplayValue();
-      if(current&&current!==pair[1])throw new Error(name+' '+address+
+    const start=name==='LOG'?7:name==='TEAM'?9:6;
+    const range=sh.getRange(header,start,1,technical.length);
+    const existing=range.getDisplayValues()[0];
+    for(let i=0;i<technical.length;i++){
+      const pair=technical[i],current=existing[i];
+      if(current&&current!==pair[1])throw new Error(name+' '+pair[0]+header+
         ' is already in use. Refusing to overwrite manually added data.');
-      if(!current)sh.getRange(address).setValue(pair[1]);
     }
-    if(name==='LOG')sh.hideColumns(7,2);
-    else sh.hideColumns(name==='TEAM'?9:6);
+    // Fill only empty cells, retaining existing cell formatting and formulas.
+    if(existing.every(x=>!x))range.setValues([technical.map(pair=>pair[1])]);
+    else for(let i=0;i<technical.length;i++)if(!existing[i])sh.getRange(technical[i][0]+header).setValue(technical[i][1]);
+    const hidden=typeof sh.isColumnHiddenByUser==='function'&&technical.every((_,i)=>sh.isColumnHiddenByUser(start+i));
+    if(!hidden)sh.hideColumns(start,technical.length);
   }
   return bvlMeta_(ss);
 }
@@ -642,7 +677,10 @@ function bvlAddRow_(ss, p) {
   sheet.getRange(next,1,1,count+2).setValues([[next-2].concat(entries,[String(p.op_id)])]);
   return {ok:true,row:next};
 }
-function bvlRead_(folderId, templateId, docId, requestId) {
+function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
+  const tabs=['LOG','INFO','TEAM','TECH'];
+  const tab=tabs.includes(requestedTab)?requestedTab:'';
+  const want=name=>!tab||tab===name;
   const phase=bvlPhaseTracer_(requestId,'read');
   phase('read_start');
   const metadata={};
@@ -654,13 +692,16 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   // Reuse these handles: getSheetByName for each tab has already been called.
   data.MISSING_TABS=['INFO','LOG','TEAM','TECH'].filter((name,i)=>![info,log,team,tech][i]);
   phase('sheet_handles_loaded');
-  const infoSections=bvlInfoSections_(info);
-  data.INFO_SECTIONS=infoSections;
-  phase('info_schema_loaded');
-  data.INFO=info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[];
-  phase('info_loaded');
+  if(want('INFO')){
+    const projection={};
+    data.INFO_SECTIONS=bvlInfoSections_(info,projection);
+    phase('info_schema_loaded');
+    // Legacy test/adapter fallback; production uses the same schema grid.
+    data.INFO=projection.legacy||(info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[]);
+    phase('info_loaded');
+  }
   let logStart=2,lr=[],photoRich=[];
-  if(log){
+  if(want('LOG')&&log){
     const logEnd=bvlEnd_(log,2,2,6);
     phase('log_end_scanned');
     logStart=Math.max(2,logEnd-119);
@@ -672,24 +713,25 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   }
   phase('log_loaded');
   const byLogId = {};
-  const gallery = ss.getSheetByName(BVL.PHOTOS);
+  const visibleIds=new Set(lr.map(v=>String(v[6]||'')).filter(Boolean));
+  const gallery = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.PHOTOS):null;
   if (gallery && gallery.getLastRow() >= 2) {
     const stored = gallery.getRange(2,1,gallery.getLastRow()-1,10).getDisplayValues();
     stored.forEach(record => {
       const logId = String(record[1] || '');
       const mediaId = String(record[0] || '');
-      if (!logId || !mediaId) return;
+      if (!logId || !mediaId || (tab&&!visibleIds.has(logId))) return;
       if (!byLogId[logId]) byLogId[logId] = [];
       byLogId[logId].push({id:mediaId, text:record[5] || 'Снимка', url:'', managed:true});
     });
   }
   phase('photos_loaded');
   const byAudio = {}, byFieldAudio = {};
-  const audioIndex = ss.getSheetByName(BVL.AUDIOS);
+  const audioIndex = (!tab||tab!=='LOG'||visibleIds.size)?ss.getSheetByName(BVL.AUDIOS):null;
   if (audioIndex && audioIndex.getLastRow() >= 2) {
     audioIndex.getRange(2,1,audioIndex.getLastRow()-1,12).getDisplayValues().forEach(r => {
-      if(r[2] === 'log' && r[1] && r[0])byAudio[String(r[1])] = {id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)};
-      if(r[2] === 'field' && r[9] && r[10] && r[11]){
+      if(want('LOG')&&r[2] === 'log' && r[1] && r[0]&&(!tab||visibleIds.has(String(r[1]))))byAudio[String(r[1])] = {id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)};
+      if(r[2] === 'field' && r[9] && r[10] && r[11]&&(!tab||String(r[9])===tab)){
         const fieldKey=String(r[9])+':'+String(r[11])+String(r[10]);
         if (!byFieldAudio[fieldKey]) byFieldAudio[fieldKey] = [];
         byFieldAudio[fieldKey].push({id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)});
@@ -699,17 +741,18 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   data.FIELD_AUDIO=byFieldAudio;
   phase('audio_index_loaded');
   const byHistory = {};
-  const audit = ss.getSheetByName(BVL.HISTORY);
+  const audit = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.HISTORY):null;
   if (audit && audit.getLastRow() >= 2) {
     audit.getRange(2,1,audit.getLastRow()-1,8).getDisplayValues().forEach(r => {
       const key = String(r[1]||'');
-      if (!key) return;
+      if (!key || (tab&&!visibleIds.has(key))) return;
       if (!byHistory[key]) byHistory[key] = [];
       byHistory[key].push({at:String(r[3]||''),author:String(r[4]||''),action:String(r[2]||''),before:String(r[5]||''),after:String(r[6]||'')});
+      if(byHistory[key].length>8)byHistory[key].shift();
     });
   }
   phase('history_loaded');
-  data.LOG = lr.map((v,i) => {
+  if(want('LOG'))data.LOG = lr.map((v,i) => {
     // Old v0.4.x hyperlinks continue to display without making files public.
     const legacy = photoRich[i] && photoRich[i][0] ? photoRich[i][0].getRuns()
       .filter(run => run.getLinkUrl() && /^https:\/\/drive\.google\.com\//.test(run.getLinkUrl()))
@@ -720,6 +763,7 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   }).filter(x => x.cells.slice(1,7).some(Boolean));
   phase('log_assembled');
   for (const name of ['TEAM','TECH']) {
+    if(!want(name))continue;
     const sheet=name==='TEAM'?team:tech;
     if(!sheet){data[name]=[];continue;}
     const end=bvlEnd_(sheet,3,2,name==='TEAM'?8:5);
@@ -732,7 +776,7 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   }
 
   phase('team_tech_loaded');
-  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data};
+  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data,loaded_tabs:tab?[tab]:tabs};
   phase('read_complete');
   return result;
 }
@@ -823,10 +867,11 @@ function bvlAudioPart_(rootId,ss,p){
   const folder=bvlAudioFolder_(rootId,ss),name=opId+'.part.'+String(number).padStart(3,'0');
   const existing=folder.getFilesByName(name);
   if(!existing.hasNext())folder.createFile(Utilities.newBlob(bytes,'application/octet-stream',name));
+  if(p.sequential===true&&number<count-1)return {ok:true,complete:false,part_index:number};
   const all=[];let size=0;
   for(let i=0;i<count;i++){
     const partName=opId+'.part.'+String(i).padStart(3,'0'),parts=folder.getFilesByName(partName);
-    if(!parts.hasNext())return {ok:true,complete:false,part_index:number};
+    if(!parts.hasNext())return {ok:true,complete:false,part_index:number,next_part:i};
     // Check existence first. Do not reread already uploaded bytes on every part.
     all.push({file:parts.next()});
   }
@@ -974,9 +1019,10 @@ function bvlPhotoFolder_(folderId, ss) {
   props.setProperty(propKey, result.getId());
   return result;
 }
-function bvlSaveImage_(folder, filename, blob) {
+function bvlSaveImage_(folder, filename, blob, status) {
   const current = folder.getFilesByName(filename);
-  return current.hasNext() ? current.next() : folder.createFile(blob);
+  if(current.hasNext()){if(status)status.created=false;return current.next();}
+  const file=folder.createFile(blob);if(status)status.created=true;return file;
 }
 function bvlInlineThumbnail_(log, row, blob, photoOpId) {
   // Blob-based overlay images are supported for private Drive files. Public IMAGE()
@@ -1039,9 +1085,10 @@ function bvlAttachPhoto_(folderId, ss, p) {
   const ext = mime === 'image/png' ? '.png' : mime === 'image/webp' ? '.webp' : '.jpg';
   const name = opId + ext;
   const original = bvlSaveImage_(photoFolder,name,Utilities.newBlob(data,mime,name));
-  const preview = bvlSaveImage_(photoFolder,opId+'-preview.jpg',thumbBlob);
-  // Do not overwrite legacy linked photo cells; new photos remain fully indexed.
-  bvlInlineThumbnail_(log,row,preview.getBlob(),opId);
+  const previewStatus={};
+  const preview = bvlSaveImage_(photoFolder,opId+'-preview.jpg',thumbBlob,previewStatus);
+  // Use exactly the bytes just saved; on retry use the already persisted file.
+  bvlInlineThumbnail_(log,row,previewStatus.created?thumbBlob:preview.getBlob(),opId);
   if (!log.getRange(row,7).getDisplayValue()) log.getRange(row,7).setValue(logId);
   const cell = log.getRange(row,6);
   if (!cell.getDisplayValue()) cell.setValue('📷');

@@ -9,11 +9,12 @@ class BVLOG_API {
     private static function accept_google_timings($diagnostics) {
         if (!is_array($diagnostics) || ($diagnostics['request_id'] ?? '') !== self::$bridge_request_id) return;
         $allowed=array('lock_wait','create_start','create_validated','create_reserved','create_copied',
-            'create_recovered','create_fields_set','create_prepared','create_flushed','create_published','create_confirmed',
+            'create_recovered','create_fields_set','create_prepared','create_flushed','create_published','create_confirmed','create_bootstrap',
             'read_start','document_opened','sheet_handles_loaded','info_schema_loaded','info_loaded','log_end_scanned',
             'log_values_loaded','log_richtext_loaded','log_loaded','photos_loaded','audio_index_loaded','history_loaded',
             'log_assembled','team_tech_loaded','read_complete','list_start','list_files_loaded','list_types_loaded',
-            'operation_start','operation_complete');
+            'operation_start','operation_complete','operation_doc_opened','operation_prepared','operation_deduplicated',
+            'operation_dedup_checked','operation_existing_row','operation_applied','operation_stamp_checked','operation_flushed');
         $total=$diagnostics['gas_ms']??null;
         if(is_int($total)&&$total>=0&&$total<=360000)self::$bridge_timings['gas_ms']=$total;
         $phases=$diagnostics['phases_ms']??array();
@@ -188,6 +189,7 @@ class BVLOG_API {
         $request_timeout = 15;
         $redirect_timeout = 12;
         if ($diag_action === 'create') { $request_timeout = 45; $redirect_timeout = 15; }
+        if ($diag_action === 'operation') { $request_timeout = 30; $redirect_timeout = 15; }
         if ($diag_action === 'read') { $request_timeout = 35; $redirect_timeout = 15; }
         if ($diag_action === 'audio_read') { $request_timeout = 45; $redirect_timeout = 25; }
         elseif ($diag_action === 'photo_read') { $request_timeout = 35; $redirect_timeout = 25; }
@@ -283,10 +285,12 @@ class BVLOG_API {
         if (!$type || !$place || (function_exists('mb_strlen') ? mb_strlen($type) : strlen($type)) > 60 || (function_exists('mb_strlen') ? mb_strlen($place) : strlen($place)) > 100) {
             return new WP_Error('bvlog_invalid', 'Action type and location are required (max 60 / 100 characters).', array('status' => 400));
         }
-        return self::forward('create', array('type' => $type, 'place' => $place, 'incident_date' => $incident_date, 'create_id' => sanitize_text_field($p['create_id'] ?? '')));
+        return self::forward('create', array('type' => $type, 'place' => $place, 'incident_date' => $incident_date, 'create_id' => sanitize_text_field($p['create_id'] ?? ''), 'bootstrap' => ($p['bootstrap']??false)===true));
     }
     public static function document($request) {
-        return self::forward('read', array('doc_id' => sanitize_text_field($request['id'])));
+        $tab=strtoupper(sanitize_key((string)$request->get_param('tab')));
+        return self::forward('read', array('doc_id' => sanitize_text_field($request['id']),
+            'tab' => in_array($tab,array('LOG','INFO','TEAM','TECH'),true)?$tab:''));
     }
     private static function operation_author($payload) {
         $identity=BVLOG_Auth::identity();
@@ -407,7 +411,7 @@ class BVLOG_API {
             return new WP_Error('bvlog_audio_input','Invalid audio chunk.',array('status'=>400));
         return self::forward('operation',array('kind'=>'audio_part','doc_id'=>$id,'op_id'=>$op,
             'target_id'=>$target,'target_kind'=>sanitize_key($p['target_kind']),
-            'mime'=>$mime,'part_index'=>$part,'part_count'=>$count,'base64'=>$base64,
+            'mime'=>$mime,'part_index'=>$part,'part_count'=>$count,'base64'=>$base64,'sequential'=>($p['sequential']??false)===true,
             'field_sheet'=>strtoupper(sanitize_key($p['field_sheet']??'')),
             'field_row'=>absint($p['field_row']??0),
             'field_col'=>strtoupper(sanitize_key($p['field_col']??'')),
