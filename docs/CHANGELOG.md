@@ -1,4 +1,19 @@
-> Update: v0.8.0 integrated draft now includes PR #21 (GAS) and PR #1 (STT), native audio Range playback with legacy fallback, and audio upload read optimization. The prior notes below are historical. No production deployment or full combined regression run has been performed.
+# Current release status
+
+**Current production (operator report, 2026-11-24): WordPress v0.8.0.1**, expected JS `0.8.0.1-b9391cb399e3`. Source commit `4a7054f10ed1b50817505de8e673f648d7939b83` ([PR #32](https://github.com/issaev/bg-voice-logger/pull/32)); [WordPress package](https://github.com/issaev/bg-voice-logger/raw/efce55ecc83084864e01e23c83d9a2268aaa158a/bg-voice-logger-v0.8.0.1.zip). Expected backend configuration: Apps Script v0.8.0 and Cloudflare STT `sar-bg-v1` ([backend package](https://github.com/issaev/bg-voice-logger/raw/b96a0f3f5cdb815f887056e48f9af60da79caa67/bg-voice-logger-v0.8.0-code.zip)); the report does not independently establish the live backend versions or JS marker. Installation is reported, not acceptance. Full combined Node/PHP, physical mobile login, Sheets/Drive integrity, media and performance verification remain pending. No issues closed and no source merge or deployment performed in this documentation update. Main still holds v0.7.2.1 pending explicit merge approval. #35 is deferred.
+
+## v0.8.0.1 — mobile Google sign-in hotfix (operator-reported production 2026-11-24; acceptance pending)
+- #34: foreground challenge reused; background session checks no longer rotate login cookie; fresh challenge immediately before credential exchange, one bounded retry for explicit login CSRF rejection, no retry on allowlist failure. Existing token validation and queues retained.
+- JS and service worker parsed, isolated credential exchange retry and non-CSRF rejection passed, distribution ZIP CRC verified. No full combined Node/PHP execution or real device acceptance yet.
+
+## v0.8.0 — integrated release (operator-reported superseded by v0.8.0.1)
+- #11, #22–#28, #33: stable incident choice, bounded retries, best-effort background sync, camera, title, arbitrary filenames and removed 250-item listing cap, hidden legacy import control, phone installation.
+- #16: integrated GAS read profiling and bounded scans from PR #21; no measured improvement claimed. Additional optimization remains open.
+- #7: authenticated Range audio playback, full-download fallback, Drive range read with full-blob fallback, fewer rereads during upload; real media and security verification pending.
+- PR #1: 34-term SAR glossary and anti-echo/no-speech STT guards integrated; real audio acceptance pending.
+- #35 deferred: replace install card with bottom icon in next release.
+
+The release notes below record historical development snapshots and their test results, not the current production status.
 
 ## v0.8.0-A — GAS read profiling and bounded scans (DRAFT, NOT DEPLOYED)
 - Staging-only guarded Apps Script runner and Node comparator; both refuse to print document IDs/cell content. Test workbook must be named `BVLOG_BENCHMARK_*` and explicitly enabled via staging Script Properties.

@@ -1,15 +1,12 @@
-# BG Voice Logger — v0.7.2.1 (operator-reported production, acceptance pending)
+# BG Voice Logger — v0.8.0.1 (operator-reported production, acceptance pending)
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script
 Sheets/Drive backend, Cloudflare Worker speech-to-text gateway, tests and docs.
 
-**Public-source safety note:** GitHub `main` now contains the v0.7.2 and v0.7.2.1 source history via merged [PR #14](https://github.com/issaev/bg-voice-logger/pull/14) and [PR #20](https://github.com/issaev/bg-voice-logger/pull/20). **The operator now reports v0.7.2.1 deployed in production; the live build and deployed Apps Script revision have not been independently verified in this update.** The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
-Operational Google Drive folder IDs and template spreadsheet IDs have been
-removed from source code and historical docs. No real secrets are included.
-The operator reports WordPress v0.7.2.1 / JS build 0.7.2.1-613947b7e695 in production. The repository includes the v0.7.2 improvements and hotfix source for #15, #17 and #18. The live server and deployed Apps Script revision have not been independently verified in this update.
-This public snapshot is **not a production upgrade package** without separate
-configuration and end-to-end validation.
+**Current production (operator report, 2026-11-24): WordPress v0.8.0.1**, expected JS `0.8.0.1-b9391cb399e3`. Source commit `4a7054f10ed1b50817505de8e673f648d7939b83` ([PR #32](https://github.com/issaev/bg-voice-logger/pull/32)); [WordPress package](https://github.com/issaev/bg-voice-logger/raw/efce55ecc83084864e01e23c83d9a2268aaa158a/bg-voice-logger-v0.8.0.1.zip). Expected backend configuration: Apps Script v0.8.0 and Cloudflare STT `sar-bg-v1` ([backend package](https://github.com/issaev/bg-voice-logger/raw/b96a0f3f5cdb815f887056e48f9af60da79caa67/bg-voice-logger-v0.8.0-code.zip)); the report does not independently establish the live backend versions or JS marker. Installation is reported, not acceptance. Full combined Node/PHP, physical mobile login, Sheets/Drive integrity, media and performance verification remain pending. No issues closed and no source merge or deployment performed in this documentation update. Main still holds v0.7.2.1 pending explicit merge approval. #35 is deferred.
+
+**Public-source safety note:** No private Google folder/template identifiers, credentials, or production data are included. The public distribution packages preserve existing site configuration; do not use them as a substitute for acceptance testing.
 
 ### Configuration
 
@@ -39,7 +36,7 @@ end-to-end `PERF-02`–`PERF-15` timings have **not** been measured. The
 historic audio/photo bridge timings must not be treated as full upload or
 playback duration. The referenced `benchmark.py` runner was not supplied.
 
-### v0.8.0-A in development (NOT deployed)
+### v0.8.0-A — historical profiling branch (integrated in PR #32; live benchmarks pending)
 
 **Staging A/B benchmark tooling:** a guarded editor-only runner (`apps-script/STAGING_READ_BENCHMARK.gs`) and a privacy-safe comparison script (`tools/compare-staging-reads.mjs`) are prepared. Use only a synthetic spreadsheet named `BVLOG_BENCHMARK_*` in an isolated staging folder; no live Google timings have been collected yet. See [Bulgarian staging instructions](docs/STAGING_TEST_V080A_BG.md).
 
