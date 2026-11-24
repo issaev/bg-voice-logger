@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.1-effa0ee0d1ce';
+  const BVLOG_RUNNING_BUILD = '0.8.1-dcfac367badc';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -338,7 +338,7 @@
     return h('button',{type:type||'button',className:'bv-btn '+(secondary?'secondary ':'')+(className||''),disabled:!!disabled,onClick:onClick},children);
   }
   function PhotoSourcePicker({disabled,onFiles,compact}) {
-    const [open,setOpen]=useState(false);
+    const [open, setOpen] = useState(false);
     const trigger=useRef(null), camera=useRef(null), gallery=useRef(null), first=useRef(null);
     useEffect(()=>{if(open&&first.current)first.current.focus();},[open]);
     useEffect(()=>{if(disabled)setOpen(false);},[disabled]);
@@ -1025,6 +1025,7 @@
         // its existing full READ populates actual server values without blocking LIST.
         await startSession(r.document);
       }catch(e){
+        if(['bvlog_invalid','bvlog_invalid_date'].includes(e.code))clearPendingCreate(key,payload.create_id);
         if(current())setError(e.message+(createPendingRef.current?' · Опитай отново със същата заявка; не създавай дубликат.':''));
       }finally{createFlightRef.current=false;setBusy(false);}
     }
@@ -2084,7 +2085,7 @@
           docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>selectExistingDocument(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
           docs.length&&h('small',{className:'bv-doc-folder-hint'},'Всички показани таблици са от папката — независимо от името.'),
-          h(Button,{disabled:!selectedDoc,onClick:()=>{
+          h(Button,{disabled:busy||!selectedDoc,onClick:()=>{
             const chosen=docs.find(d=>d.id===selectedDocRef.current && d.id===selectedDoc);
             if(!chosen){setDocsError('Избраната акция е променена или липсва. Избери я отново.');return;}
             startSession(chosen);

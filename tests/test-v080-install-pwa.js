@@ -35,7 +35,7 @@ function textOf(v){
 function appFixture(ua,standalone){
  const states={},refs={},effects=[],events={};let sx=0,rx=0;
  const mediaHandlers={};const media={matches:standalone,addEventListener:(n,f)=>mediaHandlers[n]=f,removeEventListener:(n,f)=>{if(mediaHandlers[n]===f)delete mediaHandlers[n]}};
- const win={BVLOG_CONFIG:{auth_mode:'public',api:'/wp-json/',user:{id:0},stt_mode:'none',plugin_version:'0.7.2.1'},
+ const win={BVLOG_CONFIG:{auth_mode:'public',api:'/wp-json/',user:{id:0},stt_mode:'none',plugin_version:'0.8.1'},
    isSecureContext:true,matchMedia:()=>media,setTimeout:()=>1,clearTimeout:()=>{},setInterval:()=>1,clearInterval:()=>{},
    addEventListener:(name,handler)=>events[name]=handler,
    removeEventListener:(name,handler)=>{if(events[name]===handler)delete events[name]}};
@@ -52,7 +52,7 @@ function appFixture(ua,standalone){
  function render(){sx=0;rx=0;effects.length=0;return flatten(win.__App());}
  function set(name,value){const i=stateNames.indexOf(name);assert.ok(i>=0,'Missing state '+name);states[i]=value;}
  function get(name){const i=stateNames.indexOf(name);assert.ok(i>=0,name);return states[i];}
- function installButton(nodes){return nodes.find(n=>n.type==='button'&&textOf(n).includes('Инсталирай приложението на телефона'));}
+ function installButton(nodes){return nodes.find(n=>n.type==='button'&&n.props['aria-label']==='Инсталирай приложението на телефона');}
  set('mode','choose');set('authLoading',false);set('auth',{kind:'public',name:'Synthetic'});set('queue',[]);
  return {win,media,mediaHandlers,events,render,set,get,installButton,effects};
 }
