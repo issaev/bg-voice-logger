@@ -1,6 +1,6 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status:** v0.7.1 is operator-reported production. v0.7.2 is implemented as a review candidate in `feature/v0.7.2-performance-usability` (NOT deployed); v0.8.0 remains proposed. Full v0.7.1 acceptance is not complete.
+> **Status (operator report, 2026-11-24):** **v0.7.2.1 deployed in production**, expected WP v0.7.2.1 / JS `0.7.2.1-613947b7e695`. Live build and Apps Script revision have not been independently verified in this update; real iPhone/Sheets acceptance remains open. **v0.8.0 is proposed.**
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
@@ -21,13 +21,14 @@ The app maintains the operational record of search-and-rescue incidents. **Corre
 
 ## 2. Proposed release sequence
 
-v0.7.1 was **deployed to production by the operator on 2026-11-24**, confirmed by a read-only installed-source/public-response check. v0.7.2 and v0.8.0 are **proposals** without guaranteed dates. A deployment report is not full functional acceptance.
+The operator reports **v0.7.1 → v0.7.2 → v0.7.2.1** successively deployed in production on 2026-11-24. GitHub `main` has **not** yet been reconciled with the deployed v0.7.2.1 source; see [Draft PR #20](https://github.com/issaev/bg-voice-logger/pull/20). A deployment report is not full end-to-end acceptance. v0.8.0 remains proposed.
 
 | Proposed release | Objective | Required work / tickets | Exit criteria |
 | --- | --- | --- | --- |
 | **v0.7.1 — Reliability Hotfix (production; acceptance pending)** | Protect locally entered and recorded operational data | P1 [#2](https://github.com/issaev/bg-voice-logger/issues/2), [#3](https://github.com/issaev/bg-voice-logger/issues/3), [#4](https://github.com/issaev/bg-voice-logger/issues/4), [#5](https://github.com/issaev/bg-voice-logger/issues/5), [#8](https://github.com/issaev/bg-voice-logger/issues/8), [#11](https://github.com/issaev/bg-voice-logger/issues/11); retain Safari/IndexedDB regression checks | No known reproducible data-loss/false-sync paths in isolation; safe retry and stable op IDs; INFO text editor works; Safari verification recorded |
-| **v0.7.2 — Performance & Usability (blocked by #15)** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12), **[#15](https://github.com/issaev/bg-voice-logger/issues/15) read timeout**; assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
-| **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7), **[#16](https://github.com/issaev/bg-voice-logger/issues/16) measured GAS read optimization**; bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
+| **v0.7.2 — Performance & Usability** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12); assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
+| **v0.7.2.1 — Production hotfix (acceptance pending)** | Continuous voice LOG, scoped errors and Google read resilience | [#15](https://github.com/issaev/bg-voice-logger/issues/15), [#17](https://github.com/issaev/bg-voice-logger/issues/17), [#18](https://github.com/issaev/bg-voice-logger/issues/18); [Draft PR #20](https://github.com/issaev/bg-voice-logger/pull/20) | Operator-reported deployment; independently verify JS build/GAS revision, iPhone STT→confirmation→upload→Sheets echo, timeouts and safe error history before closing issues |
+| **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7); bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
 
 ### Production status update — 2026-11-24
 
@@ -58,17 +59,10 @@ The report was obtained without modifying production code, data, caches or queue
 
 ### v0.7.2 — performance and usability work (some changes require coordinated GAS deployment)
 
-**Candidate implementation (2026-11-24):** #6, #9, #10 and #12 have code + isolated tests on a feature branch. This is **not** production acceptance and does not close Issues. QA gates: test date creation against the real Apps Script, verify 120s refresh doesn't conflict with manual edits, test sticky queue on iPhone, and test photo anchors after manual sort because read-side auto-repair was deliberately removed. Browser before/after latency metrics and iPhone regression tests are still missing. See [v0.7.2 upgrade guide](UPGRADE_V072_BG.md).
-
-**NEW P1 release blocker [#15](https://github.com/issaev/bg-voice-logger/issues/15):** Production v0.7.1 WordPress diagnostics showed `read` POST `curl_28_timeout:limit_15s` at 15.009s while a contemporaneous Apps Script deployment Version 12 execution lasted 19.326s. Exact request correlation remains unproven without a shared ID. The draft **v0.7.2 still has the same `read` POST 15-second limit**, despite eliminating N+1 LOG reads and removing read-side image mutations. **Do not release v0.7.2 as-is or activate its 120s auto-refresh in production** until the request budget/host timeouts are validated, ambiguous post-write refresh errors are distinguished from write failures, and staging latency/reliability evidence is collected. Proposed mitigation: conditional 35s `read`-only POST timeout with an end-to-end WP+redirect budget and safe backoff. **No implementation of #15 is included in the current PR.**
-
-
-
 - [ ] **[#6 / AUDIT-05] Deduplicate LOG refreshes.** Existing flow calls refresh for every successful LOG and once more after a touched batch (N+1 full reads). Coalesce to **one** final refresh for the active incident while retaining per-operation ack/conflict and stale-response guards.
 - [ ] **[#9 / UX-01] One-click queue and review from the header.** Make an always discoverable top/sticky queue button, prioritize failed/conflicted/voice-review items, and keep local-only access consistent in supported auth modes. Avoid forcing users to scroll through hundreds of LOG events. Coordinate unsaved-audio warning with #5.
 - [ ] **[#10 / FEATURE-01] Date picker on incident creation.** Default to today's date in Europe/Sofia; allow past/future incident date; update preview/name/INFO/LOG via validated WordPress + Apps Script create payload. Keep real creation and event timestamps unchanged and correctly handle a LOG entry on a different day.
 - [ ] **[#12 / UX-02] Visibility of external Google Sheets edits.** Keep an explicit refresh action and show when the active document was last refreshed. Investigate safe background revalidation without resetting local drafts, increasing unnecessary full reads or breaking `conflict` / `row_moved`. Verify deployed GAS read has no write side effects before any periodic polling; measure refresh cost and freshness.
-- [ ] **[#15 / BUG-READ-TIMEOUT] Production slow-read transport failure.** Validate a `read`-only 35s POST budget with separate redirect GET/hosting/proxy limits; distinguish server ACK from failed post-write refresh; correlate safe WP/GAS request timings. Keep 120s polling disabled/gated pending safe read-only and load tests. **P1 release blocker; not yet implemented.**
 - [ ] **Browser-first benchmarks.** Measure navigation → usable shell separately from navigation → confirmed fresh Google data; measure selected incident and each tab as specified in `protocol.txt`. Do not compare HTML-only curl time against UI-ready time.
 - [ ] **Assets.** Confirm which WordPress theme/plugins scripts and styles are unnecessary specifically on `/dka/`. Remove/dequeue only if mobile/desktop visual and functional checks pass; static assets were Cloudflare HIT in the baseline, so avoid a blind global purge.
 - [ ] **Cache policy.** If snapshot-first is implemented, bind cached data to the same authenticated identity and incident; clearly display “cached / refreshing / fresh”. Revalidate. No private HTML/auth/REST caching at Cloudflare and no stale data presented as current.
@@ -83,8 +77,7 @@ The report was obtained without modifying production code, data, caches or queue
 - [ ] Cache template type options only with versioning/invalidation; never use a stale cache as permission to overwrite a field.
 - [ ] **[#7 / AUDIT-06] Playback.** Current bundled GAS reads the entire Drive blob before returning each 512 KiB slice. Plan a private, authorized binary/Range path with time-to-first-audio independent of whole-file download. Do not parallelize current whole-blob chunk reads blindly.
 - [ ] **Upload.** Benchmark current sequential 256 KiB audio chunks and photo original+preview by fixed sizes, then design resumable transfer and sensible chunk sizing. Preserve upload checkpoints, duplicate protection and checksums.
-- [ ] **[#16 / PERF-READ-08] Instrument and optimize Google document `read` end-to-end.** Profile Drive membership / spreadsheet opening, dynamic INFO sections, bounded LOG and TEAM/TECH, full photo/audio/history indexes and legacy rich text with correlation IDs. Split/lazy-load expensive metadata only after measured evidence; preserve manual edits and media association.
-- [ ] **Lock/timeout.** Reconcile the bundled GAS global lock wait (up to 25 s) and WordPress forward POST timeout (15 s); use clear retryable busy handling and idempotent replay, not timeouts alone. **Important distinction:** GAS script lock applies to `create`/`operation`, not `read`; measure the two cases separately.
+- [ ] **Lock/timeout.** Reconcile the bundled GAS global lock wait (up to 25 s) and WordPress forward POST timeout (15 s); use clear retryable busy handling and idempotent replay, not timeouts alone.
 - [ ] Test private media authorization/caching for different identities and device changes.
 
 ## 3. Independent STT Worker track
@@ -156,4 +149,4 @@ A proposed version is ready to ship only if **all** checks relevant to its scope
 
 ---
 
-*This roadmap combines the original REQ-026 audit with the subsequently reported v0.7.1 production deployment. GitHub main is synchronized to the v0.7.1 public source; private site configuration and end-to-end runtime acceptance remain outside this reconciliation.*
+*Production v0.7.2.1 is operator-reported; GitHub main has not yet been reconciled with this release. Runtime acceptance and private site/Google configuration remain outside source control.*
