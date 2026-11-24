@@ -110,6 +110,17 @@ class BVLOG_API {
             'detail' => preg_replace('/[^A-Za-z0-9_.:-]/', '_', substr((string)$detail, 0, 100)),
         );
         update_option('bvlog_bridge_diagnostics', $snapshot, false);
+        // Preserve terminal outcomes even when a later successful request replaces
+        // the last-diagnostics snapshot. Only fixed action/stage/timing metadata.
+        $terminal = array('complete','post_transport_error','get_transport_error',
+            'invalid_json','invalid_redirect','http_error','not_configured','invalid_endpoint');
+        if (in_array($stage, $terminal, true) &&
+            in_array($action, array('list','read','operation','create'), true)) {
+            $history = get_option('bvlog_bridge_request_history', array());
+            if (!is_array($history)) $history = array();
+            array_unshift($history, $snapshot);
+            update_option('bvlog_bridge_request_history', array_slice($history, 0, 30), false);
+        }
         // Keep a short secret-free history for media timings. Do not record
         // payloads, usernames, operational data or signed Google redirect URLs.
         if (in_array($action, array('audio_read','audio_write','photo_read','photo_write'), true) &&
@@ -141,6 +152,7 @@ class BVLOG_API {
 
         $body = array(
             'secret' => $secret, 'action' => $action,
+            'request_id' => self::$bridge_request_id,
             'folder_id' => $s['folder_id'], 'template_id' => $s['template_id'],
             'payload' => $payload,
         );
@@ -150,6 +162,7 @@ class BVLOG_API {
         // giving slower Google Drive media calls time to complete.
         $request_timeout = 15;
         $redirect_timeout = 12;
+        if ($diag_action === 'read') { $request_timeout = 35; $redirect_timeout = 15; }
         if ($diag_action === 'audio_read') { $request_timeout = 45; $redirect_timeout = 25; }
         elseif ($diag_action === 'photo_read') { $request_timeout = 35; $redirect_timeout = 25; }
         elseif ($diag_action === 'photo_write' || $diag_action === 'audio_write') {

@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2-c6f4de4c832a';
+  const BVLOG_RUNNING_BUILD = '0.7.2.1-613947b7e695';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -231,11 +231,31 @@
   function timeOf(time) {
     return new Date(time||Date.now()).toLocaleTimeString('bg-BG',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Sofia'});
   }
+  // One journal feed: an operation keeps the same identity from a local voice
+  // recording through confirmation, upload and the first successful Sheets read.
+  function journalEntries(queue,logs,docId,limit) {
+    const remote=(Array.isArray(logs)?logs:[]).filter(x=>x&&x.row>=2).slice().reverse();
+    const serverIds=new Set(remote.map(x=>String((x.cells||[])[6]||'')).filter(Boolean));
+    const local=(Array.isArray(queue)?queue:[]).filter(o=>o&&o.doc_id===docId &&
+      o.state!=='cancelled' && (o.kind==='log'||(o.kind==='audio'&&
+        !(o.target&&o.target.kind==='field'))) && !serverIds.has(String(o.op_id||'')))
+      .slice().sort((a,b)=>String(b.event_at||b.created||'').localeCompare(String(a.event_at||a.created||'')));
+    // The same React key is used when a local op becomes a server-backed row.
+    return local.map(o=>({key:'log:'+o.op_id,local:o})).concat(remote.map(x=>({
+      key:(x.cells||[])[6]?'log:'+String(x.cells[6]):'legacy-row:'+x.row,remote:x
+    }))).slice(0,limit||35);
+  }
+  function isLocalJournalOp(o,docId) {
+    return !!(o&&docId&&o.doc_id===docId&&
+      (o.kind==='log'||(o.kind==='audio'&&!(o.target&&o.target.kind==='field'))));
+  }
   function EntryStatus({status}) {
     const m = {
       synced:['check',B('Sinhronizirano'),'good'], pending:['clock',B('V opashkata'),'wait'],
       sending:['refresh',B('Izprashta se'),'wait'], local_error:['alert','Проблем с локалното аудио','bad'], conflict:['alert',B('Konflikt'),'bad'],
-      audio:['mic',B('Chaka transkriptsiya'),'wait'], transcribing:['refresh',B('Transkribira se'),'wait'], review:['edit',B('Proveri poleto'),'wait'], photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
+      audio:['mic',B('Chaka transkriptsiya'),'wait'], transcribing:['refresh',B('Transkribira se'),'wait'],
+      voice_review:['edit','За потвърждение','wait'], review:['edit',B('Proveri poleto'),'wait'],
+      photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
     };
     const x = m[status]||['alert',B('Greshka'),'bad'];
     return h('span',{className:'bv-status '+x[2]},icon(x[0],14),x[1]);
@@ -327,9 +347,13 @@
     const [photoBusy,setPhotoBusy]=useState(false);
     const [gpsBusy,setGpsBusy]=useState(false);
     const [voiceIssue,setVoiceIssue]=useState('');
+    const [voiceReviewDrafts,setVoiceReviewDrafts]=useState({});
     const [queue,setQueue]=useState([]);
     const [busy,setBusy]=useState(false);
-    const [error,setError]=useState('');
+    const [error,setError]=useState(''); // Audio, media and other action-level errors.
+    const [docsError,setDocsError]=useState('');
+    const [syncError,setSyncError]=useState('');
+    const [localStoreError,setLocalStoreError]=useState('');
     const [notice,setNotice]=useState('');
     const [microphoneMenu,setMicrophoneMenu]=useState(false);
     const [microphones,setMicrophones]=useState([]);
@@ -347,6 +371,8 @@
     const [docLoadError,setDocLoadError]=useState('');
     const [lastFreshAt,setLastFreshAt]=useState('');
     const documentRequestRef=useRef(0);
+    const documentReadInFlightRef=useRef(null);
+    const readBackoffRef=useRef({id:'',attempts:0,nextAt:0});
     const [draft,setDraft]=useState('');
     const [liveText,setLiveText]=useState('');
     const [recording,setRecording]=useState(false);
@@ -599,8 +625,9 @@
     async function refreshQueue() {
       try {
         setQueue((await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||'')));
+        setLocalStoreError('');
         return true;
-      }catch(e){setError(B('Nedostqpno lokalno hranilishte: ')+e.message);return false;}
+      }catch(e){setLocalStoreError(B('Nedostqpno lokalno hranilishte: ')+e.message);return false;}
     }
     async function loadDocs() {
       if(CFG.auth_mode!=='public' && !authRef.current)return;
@@ -619,12 +646,15 @@
         // Never override a selection made while this async request was pending.
         setSelectedDoc(previous=>fresh.some(x=>x.id===previous)?previous:(fresh[0]?fresh[0].id:''));
         localStorage.setItem(localCacheKey('docs'),JSON.stringify(fresh));
-        setError('');
-      }catch(e){if(request===docsRequestRef.current && scope===DB)setError(e.message);}
+        setDocsError('');
+      }catch(e){if(request===docsRequestRef.current && scope===DB)setDocsError(e.message);}
       finally{if(request===docsRequestRef.current && scope===DB)setDocsLoading(false);}
     }
     async function loadDocument(id) {
+      // A manual refresh and the 120s poll must not launch the same read twice.
+      if(documentReadInFlightRef.current?.id===id)return false;
       const request=++documentRequestRef.current;
+      documentReadInFlightRef.current={id,request};
       setDocLoading(true);setDocLoadError('');
       try{
         if(!navigator.onLine){
@@ -639,18 +669,28 @@
         if(request!==documentRequestRef.current)return;
         setData(r.data);
         setLastFreshAt(new Date().toISOString());
+        readBackoffRef.current={id,attempts:0,nextAt:0};
         try{await database('put','snapshots',{id,data:r.data,updated:new Date().toISOString()});}
         catch(localError){setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
         if(request!==documentRequestRef.current)return;
         try{const snap=await database('get','snapshots',id);if(snap)setData(snap.data);}
         catch(ignore){}
-        setDocLoadError(e.message||'Неуспешно зареждане от Google Sheets.');
-      }finally{if(request===documentRequestRef.current)setDocLoading(false);}
+        setDocLoadError('Google Sheets: '+(e.message||'Неуспешно обновяване.')+
+          (lastFreshAt?' Показани са последните потвърдени данни от '+timeOf(lastFreshAt)+'.':''));
+        const previous=readBackoffRef.current;
+        const attempts=(previous.id===id?previous.attempts:0)+1;
+        readBackoffRef.current={id,attempts,
+          nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+      }finally{
+        if(documentReadInFlightRef.current?.request===request)documentReadInFlightRef.current=null;
+        if(request===documentRequestRef.current)setDocLoading(false);
+      }
     }
     async function startSession(chosen) {
       if (!chosen || !checkOperatorName()) return;
       setDoc(chosen); docRef.current=chosen;
+      readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
       setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
       localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));
       await loadDocument(chosen.id);
@@ -676,7 +716,7 @@
       try {
         item.doc_name=item.doc_name || (docRef.current && docRef.current.id===item.doc_id ? docRef.current.name : (docs.find(d=>d.id===item.doc_id)||{}).name) || '';
         await database('put','queue',item);
-      }catch(e){setError(B('NE e zapazeno: ')+e.message);return false;}
+      }catch(e){setLocalStoreError(B('NE e zapazeno: ')+e.message);return false;}
       // A failed UI refresh does not undo a durable IndexedDB commit.
       try {
         const refreshed=await refreshQueue();
@@ -886,7 +926,8 @@
            (op.kind==='photo'&&(!op.log_op_id||latest.some(x=>x.op_id===op.log_op_id&&x.state==='synced')))||
            (op.kind==='audio_upload'&&latest.some(x=>x.op_id===op.target_id&&x.state==='synced'))));
         if(ready)window.setTimeout(()=>syncAll(),650);
-      }catch(e){setError('Синхронизация: '+e.message);}
+        setSyncError('');
+      }catch(e){setSyncError('Синхронизация: '+e.message);}
       finally{syncingRef.current=false;}
     }
     useEffect(()=>{
@@ -923,7 +964,9 @@
       const timer=window.setInterval(()=>{
         const fresh=refreshRef.current;
         if(document.hidden||!navigator.onLine||syncingRef.current||
-           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id)return;
+           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id||
+           documentReadInFlightRef.current ||
+           (readBackoffRef.current.id===id && Date.now()<readBackoffRef.current.nextAt))return;
         fresh.load(id);
       },120000);
       return()=>window.clearInterval(timer);
@@ -1345,13 +1388,50 @@
       }
       await database('put','queue',newer);await refreshQueue();
     }
+    function voiceDraft(o) {
+      return Object.prototype.hasOwnProperty.call(voiceReviewDrafts,o.op_id)?
+        voiceReviewDrafts[o.op_id]:(o.transcript||'');
+    }
+    function updateVoiceDraft(o,text) {
+      setVoiceReviewDrafts(old=>Object.assign({},old,{[o.op_id]:text}));
+    }
+    function clearVoiceDraft(opId) {
+      setVoiceReviewDrafts(old=>{const next=Object.assign({},old);delete next[opId];return next;});
+    }
     async function approveVoice(o){
-      const stored=await database('get','queue',o.op_id);
-      if(!stored||stored.state!=='voice_review')return;
-      const area=document.getElementById('bv-audio-review-'+o.op_id);
-      const text=area?area.value:(stored.transcript||'');
-      await audioToText(Object.assign({},stored,{state:'audio'}),text,null);
-      setNotice('Провереният текст е добавен за синхронизация.');
+      try {
+        const stored=await database('get','queue',o.op_id);
+        if(!stored||stored.state!=='voice_review')return;
+        const text=voiceDraft(stored).trim();
+        if(!text){setError('Потвърди текста на гласовия запис.');return;}
+        await audioToText(Object.assign({},stored,{state:'audio'}),text,null);
+        const updated=await database('get','queue',o.op_id);
+        if(updated&&updated.kind==='log'){
+          clearVoiceDraft(o.op_id);
+          setNotice('Провереният текст е добавен за синхронизация.');
+        }
+      }catch(e){setError('Потвърждение на диктовката: '+e.message);}
+    }
+    async function saveAudioText(o){
+      try {
+        const text=voiceDraft(o).trim();
+        if(!text)return;
+        await audioToText(o,text,null);
+        const updated=await database('get','queue',o.op_id);
+        if(updated&&updated.kind==='log')clearVoiceDraft(o.op_id);
+      }catch(e){setError('Ръчна транскрипция: '+e.message);}
+    }
+    function voiceInputControls(o) {
+      const text=voiceDraft(o);
+      return h('div',{className:'bv-inline-voice-review'},
+        o.state==='voice_review'&&h('p',{className:'bv-voice-issue'},
+          'Провери транскрипцията и прослушай оригинала преди изпращане.'),
+        h('textarea',{className:'bv-textarea',value:text,maxLength:3000,
+          'aria-label':'Транскрипция за проверка',
+          placeholder:'Въведи или поправи текста на гласовия запис...',
+          onChange:e=>updateVoiceDraft(o,e.target.value)}),
+        h(Button,{disabled:!text.trim(),onClick:()=>o.state==='voice_review'?approveVoice(o):saveAudioText(o)},
+          o.state==='voice_review'?'Потвърди и запиши':'Запиши текста'));
     }
 
     async function toggleFieldVoice() {
@@ -1540,6 +1620,7 @@
         || String(b.created||'').localeCompare(String(a.created||'')));
     const myQueue=queue.filter(o=>!doc||o.doc_id===doc.id).slice().reverse();
     const logs=data&&data.LOG||[];
+    const journalFeed=journalEntries(queue,logs,doc&&doc.id,35);
     const title=doc&&doc.name||'Документ за координация на акция';
     function loadingRows(label){
       return h('div',{className:'bv-loading-rows',role:'status','aria-live':'polite'},
@@ -1565,6 +1646,11 @@
           auth&&auth.kind==='google'&&h('button',{className:'bv-logout-top',onClick:googleLogout,title:'Изход от Google сесията'},icon('logout',16)),
           h('div',{className:'bv-connect '+(online?'connected':'disconnected')},icon(online?'cloud':'offline',17),online?B('Onlayn'):B('Oflayn')))),
       error&&h('div',{className:'bv-banner error'},icon('alert',18),h('span',null,error),h('button',{onClick:()=>setError(''),'aria-label':'Close'},icon('close',16))),
+      localStoreError&&h('div',{className:'bv-banner error',role:'alert'},icon('alert',18),
+        h('span',null,'Локално съхранение: '+localStoreError),
+        h('button',{onClick:()=>setLocalStoreError(''),'aria-label':'Затвори предупреждението'},icon('close',16))),
+      syncError&&h('div',{className:'bv-banner error',role:'alert'},icon('alert',18),
+        h('span',null,syncError),h('button',{onClick:()=>setSyncError(''),'aria-label':'Затвори'},icon('close',16))),
       CFG.expected_build && CFG.expected_build!==BVLOG_RUNNING_BUILD && h('div',{className:'bv-banner error',role:'alert'},'Несъответствие между заредения JavaScript и версията на сайта. Презареди, когато не записваш.'),
       notice&&h('div',{className:'bv-banner info'},icon('info',16),h('span',null,notice),h('button',{onClick:()=>setNotice(''),'aria-label':'Close'},icon('close',14))),
       (audioPlayer||audioBusy)&&h('section',{className:'bv-audio-dock',role:'region','aria-label':'Прослушване на оригинално аудио'},
@@ -1596,6 +1682,9 @@
           h('p',{className:'bv-muted'},B('Popqlva se vednqzh na tova ustroystvo i se zapisva v zhurnala. Nqma proverka na samolichnostta.'))),
         h('div',{className:'bv-card'},
           h('div',{className:'bv-row spread'},h('strong',null,B('Sqshtestvuvashta aktsiya')),h('button',{className:'bv-icon-btn',onClick:loadDocs,disabled:docsLoading},icon('refresh',18))),
+          docsError&&h('div',{className:'bv-load-error',role:'alert'},
+            'Списъкът с акции не е обновен: '+docsError,
+            h('button',{type:'button',onClick:loadDocs,disabled:docsLoading},'Опитай отново')),
           docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>setSelectedDoc(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
           h(Button,{disabled:!selectedDoc,onClick:()=>startSession(docs.find(d=>d.id===selectedDoc))},icon('arrow',18),' ',B('Otvori aktsiyata'))),
@@ -1683,28 +1772,46 @@
               h('button',{title:'Премахни снимката',onClick:()=>setPhotos(q=>q.filter((_,j)=>j!==i))},icon('close',13))))),
           h('div',{className:'bv-section-head'},h('h3',null,B('Posledni sqbitiya')),
             h('button',{className:'bv-icon-btn',onClick:()=>loadDocument(doc.id),title:B('Obnovi')},icon('refresh',18))),
-          h('div',{className:'bv-local-entries'},
-            myQueue.filter(o=>o.kind==='log'&&['pending','sending','error'].includes(o.state)).map(o=>
-              h('div',{className:'bv-event bv-local-event',key:o.op_id},
-                h('span',{className:'bv-event-time'},timeOf(o.event_at)),
-                h('div',{className:'bv-event-body'},h('strong',null,o.text),h(EntryStatus,{status:o.state}),
-                  queue.some(item=>item.kind==='audio_upload'&&item.target_id===o.op_id&&hasQueueMedia(item))&&
-                    h(Button,{secondary:true,onClick:()=>{const a=queue.find(item=>item.kind==='audio_upload'&&item.target_id===o.op_id&&hasQueueMedia(item));if(a)playQueueAudio(a);}},'Чуй оригинала'),
-                  queue.filter(item=>item.kind==='photo'&&item.log_op_id===o.op_id&&hasQueueMedia(item)&&item.state!=='cancelled').length>0&&
-                    h('div',{className:'bv-event-photos'},h('button',{className:'bv-photo-indicator pending',
-                      onClick:()=>openLocalGallery(o)},icon('image',16),' Чакащи снимки (',
-                      queue.filter(item=>item.kind==='photo'&&item.log_op_id===o.op_id&&hasQueueMedia(item)&&item.state!=='cancelled').length,')')))))),
           h('div',{className:'bv-events'},
             !data&&docLoading&&loadingRows('Зареждане на последните събития...'),
-            logs.slice().reverse().filter(x=>x.row>=2).slice(0,35).map(x=>{
+            journalFeed.map(item=>{
+              if(item.local){
+                const o=item.local;
+                const child=queue.find(q=>q.kind==='audio_upload'&&q.target_id===o.op_id&&hasQueueMedia(q));
+                const playable=hasQueueMedia(o)?o:child;
+                const photoCount=queue.filter(q=>q.kind==='photo'&&q.log_op_id===o.op_id&&
+                  hasQueueMedia(q)&&q.state!=='cancelled').length;
+                return h('div',{className:'bv-event bv-local-event',key:item.key},
+                  h('span',{className:'bv-event-time'},timeOf(o.event_at||o.created)),
+                  h('div',{className:'bv-event-body'},
+                    h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
+                    o.state==='synced'?
+                      h('span',{className:'bv-status wait'},icon('refresh',14),
+                        'Записано в Google · очаква опресняване'):
+                      h(EntryStatus,{status:o.state}),
+                    (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
+                    playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
+                      icon('play',15),' Чуй оригинала'),
+                    photoCount>0&&h('div',{className:'bv-event-photos'},
+                      h('button',{className:'bv-photo-indicator pending',onClick:()=>openLocalGallery(o)},
+                        icon('image',16),' Чакащи снимки (',photoCount,')')),
+                    o.error&&h('small',{className:'bv-voice-issue'},'Последна грешка: '+o.error),
+                    o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{
+                      await database('put','queue',Object.assign({},o,{state:'pending'}));
+                      await refreshQueue();syncAll();
+                    }},'Повтори изпращането')));
+              }
+              const x=item.remote;
               const c=x.cells,divider=String(c[3]||'').startsWith('ДАТА:');
-              if(divider)return h('div',{key:x.row,className:'bv-day-divider'},c[3]);
+              if(divider)return h('div',{key:item.key,className:'bv-day-divider'},c[3]);
               const cancelled=x.status==='cancelled';
-              return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:x.row},
+              return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:item.key},
                 h('span',{className:'bv-event-time'},c[1]||'--:--'),
                 h('div',{className:'bv-event-body'},
                   h('strong',null,c[3]||''),
                   h('small',null,(cancelled?'АНУЛИРАНО · ':'')+(c[2]||'')+(c[4]?' | '+c[4]:'')),
+                  !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
+                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано'),
                   h('div',{className:'bv-event-photos'},
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
@@ -1726,7 +1833,7 @@
                     expandedHistory===x.row&&x.history.map((v,i)=>h('small',{key:i},
                       (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||''))))));
             }),
-            data&&!logs.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
+            data&&!journalFeed.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
 
         ) : page==='INFO' ? h('section',{className:'bv-form-screen'},
           h('h2',null,B('Osnovni danni')),h('p',{className:'bv-muted'},B('Izberi pole, za da go promenish.')),
@@ -1782,9 +1889,11 @@
               localSaveFailed?B('Audioto NE e zapazeno lokalno'):waiting?waiting+' '+B('chakashti operatsii'):B('Vsichko e sinhronizirano')),
             h('button',{className:'bv-plain',onClick:syncAll,disabled:!online},icon('refresh',16),' ',B('Sinhroniziray'))),
           h('button',{className:'bv-plain',onClick:closeSession,disabled:recording},icon('back',16),' ',B('Smeni aktsiyata')))),
-      (queue.some(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state)))&&h('section',{className:'bv-pending'},
+      (myQueue.some(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
+        !isLocalJournalOp(o,doc&&doc.id)))&&h('section',{className:'bv-pending'},
         h('h3',null,B('Operatsii za proverka')),
-        myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state)).map(o=>h('div',{className:'bv-card',key:o.op_id},
+        myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
+          !isLocalJournalOp(o,doc&&doc.id)).map(o=>h('div',{className:'bv-card',key:o.op_id},
           h(EntryStatus,{status:o.state}),
           h('p',{className:'bv-muted'},'Акция: '+queueTarget(o)+(o.target&&o.target.kind==='field'?' · '+(o.target.sheet||'')+' '+(o.target.col||'')+(o.target.row||''):'')),
           h('p',null,o.kind==='field'?(o.sheet+' '+o.col+o.row+' : '+o.value):o.kind==='audio'?B('Audio zapis ot ')+timeOf(o.event_at):o.error),
@@ -1851,12 +1960,10 @@
             o.state==='review'&&h(Button,{onClick:()=>reviewAudioField(o)},'Прегледай и запиши полето'),
             o.state==='voice_review'&&h('div',null,
               hasQueueMedia(o)&&h(Button,{secondary:true,onClick:()=>playQueueAudio(o)},'Чуй оригинала'),
-              h('textarea',{id:'bv-audio-review-'+o.op_id,defaultValue:o.transcript||'',maxLength:3000}),
-              h(Button,{onClick:()=>approveVoice(o)},'Потвърди транскрипцията')),
+              voiceInputControls(o)),
             o.state==='audio'&&hasQueueMedia(o)&&h('div',{className:'bv-row'},
               h(Button,{secondary:true,onClick:()=>playQueueAudio(o)},'Прослушай'),
-              h('textarea',{id:'audioQueue-'+o.op_id,defaultValue:o.transcript||'',placeholder:'Въведи текстовата транскрипция'}),
-              h(Button,{onClick:()=>{const el=document.getElementById('audioQueue-'+o.op_id);audioToText(o,el?el.value:'');}},'Запиши текста'),
+              voiceInputControls(o),
               CFG.stt_mode==='cloud'&&CFG.stt_cloud&&h(Button,{secondary:true,onClick:()=>retryAudio(o)},'Повтори STT')),
             h('div',{className:'bv-row'},
               ['pending','error','audio','review','voice_review','conflict','cancelled','local_error'].includes(o.state)&&h('button',{className:'bv-delete-op',onClick:()=>dropQueued(o)},icon('trash',15),' Изтрий от телефона'),

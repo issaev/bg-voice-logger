@@ -96,6 +96,27 @@ class BVLOG_Admin {
           </p>
         </div>
         <?php endif; ?>
+        <?php $recent_requests = (array)get_option('bvlog_bridge_request_history', array()); ?>
+        <?php if ($recent_requests) : ?>
+        <details style="margin:15px 0;">
+          <summary><strong>Recent Google list/read/write requests (last 30, sanitized)</strong></summary>
+          <table class="widefat striped" style="max-width:1050px;margin-top:8px;">
+            <thead><tr><th>UTC</th><th>Request</th><th>Action</th><th>Stage</th><th>Time</th><th>HTTP</th><th>Detail</th></tr></thead>
+            <tbody>
+            <?php foreach (array_slice($recent_requests, 0, 30) as $item) : ?>
+              <tr><td><?php echo esc_html($item['time_utc'] ?? ''); ?></td>
+                <td><code><?php echo esc_html($item['request_id'] ?? ''); ?></code></td>
+                <td><?php echo esc_html($item['action'] ?? ''); ?></td>
+                <td><?php echo esc_html($item['stage'] ?? ''); ?></td>
+                <td><?php echo esc_html((string)($item['elapsed_ms'] ?? '')); ?> ms</td>
+                <td><?php echo esc_html((string)($item['http_status'] ?? '')); ?></td>
+                <td><code><?php echo esc_html($item['detail'] ?? ''); ?></code></td></tr>
+            <?php endforeach; ?>
+            </tbody>
+          </table>
+          <p class="description">Safe request IDs can be matched to Google Apps Script executions after deploying the matching backend. No document names, cell values, media or credentials are logged.</p>
+        </details>
+        <?php endif; ?>
         <?php $recent_media = (array)get_option('bvlog_bridge_media_history', array()); ?>
         <?php if ($recent_media) : ?>
         <details style="margin:15px 0;">

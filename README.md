@@ -1,13 +1,13 @@
-# BG Voice Logger — v0.7.2 source candidate (not deployed)
+# BG Voice Logger — v0.7.2.1 (operator-reported production, acceptance pending)
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script
 Sheets/Drive backend, Cloudflare Worker speech-to-text gateway, tests and docs.
 
-**Public-source safety note:** This branch develops v0.7.2 on top of the v0.7.1 source merged by [PR #13](https://github.com/issaev/bg-voice-logger/pull/13). **The operator-reported production site remains v0.7.1; v0.7.2 has not been deployed.** The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
+**Public-source safety note:** This branch develops v0.7.2 on top of the v0.7.1 source merged by [PR #13](https://github.com/issaev/bg-voice-logger/pull/13). **The operator now reports v0.7.2.1 deployed in production; the live build and deployed Apps Script revision have not been independently verified in this update.** The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
 Operational Google Drive folder IDs and template spreadsheet IDs have been
 removed from source code and historical docs. No real secrets are included.
-The operator reports WordPress v0.7.1 deployed in production. Merging PR #13 updated GitHub only and did not deploy or modify the website or deployed Apps Script.
+The operator reports WordPress v0.7.2 / JS build 0.7.2-c6f4de4c832a in production; GitHub main still contains the earlier v0.7.1 source. This branch includes the v0.7.2 implementation and hotfixes #15, #17 and #18.
 This public snapshot is **not a production upgrade package** without separate
 configuration and end-to-end validation.
 
@@ -41,9 +41,9 @@ playback duration. The referenced `benchmark.py` runner was not supplied.
 
 ### Project status
 
-**Development candidate:** v0.7.2 / JS build `0.7.2-c6f4de4c832a`. The operator-reported live installation is v0.7.1; there is no v0.7.2 deployment. New features: #6 coalesced LOG refresh, #9 sticky queue, #10 incident date picker, #12 conservative 120-second external Google Sheets revalidation plus manual refresh on all tabs. Google Apps Script reads no longer mutate photo anchors. Cloudflare STT and IndexedDB schema 2 remain unchanged.
+**Release candidate:** WordPress v0.7.2.1; embedded JS build `0.7.2.1-613947b7e695`. Operator-reported production is v0.7.2.1. This branch is based on the v0.7.2 feature source plus [#18](https://github.com/issaev/bg-voice-logger/issues/18) voice continuity, and fixes [#15](https://github.com/issaev/bg-voice-logger/issues/15) read timeout / diagnostics and [#17](https://github.com/issaev/bg-voice-logger/issues/17) scoped errors. Cloudflare STT and IndexedDB schema remain unchanged.
 
-**Tests:** 19/29 test files pass versus 17/27 in v0.7.1, with the same 10 historical failures; test-incident, real iPhone and Google Sheets/Drive acceptance are pending. See [v0.7.2 upgrade / rollback guide](docs/UPGRADE_V072_BG.md). Do not merge or deploy without review and explicit release approval.
+**Verification:** 22/32 isolated test files passed, with the same ten historical failures observed in the v0.7.2 predecessor. Real iPhone Safari, Google Sheets/Drive and 20–35s timing scenarios have **not yet been confirmed** on the candidate. Read [v0.7.2.1 upgrade/rollback notes](docs/UPGRADE_V0721_BG.md) before attempting a release. The operator deployed v0.7.2.1 independently; the branch/PR itself did not perform deployment.
 
 ### License
 
