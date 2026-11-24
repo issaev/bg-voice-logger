@@ -115,6 +115,8 @@ add_action('init', function () {
         header('X-Content-Type-Options: nosniff');
         header('Service-Worker-Allowed: /');
         echo 'self.BVLOG_APP_URL = ' . wp_json_encode(bvlog_app_url()) . ';';
+        echo 'self.BVLOG_API_ROOT = ' . wp_json_encode(rest_url('bvlog/v1/')) . ';';
+        echo 'self.BVLOG_NONCE_URL = ' . wp_json_encode(admin_url('admin-ajax.php?action=bvlog_nonce')) . ';';
         echo 'self.BVLOG_CACHE_ID = ' . wp_json_encode('bgvl-' . bvlog_service_worker_build() . '-assets') . ';';
         echo 'self.BVLOG_REQUIRED_ASSETS = ' . wp_json_encode(array(
             BVLOG_URL . 'assets/app.js?ver=' . rawurlencode(bvlog_asset_version('assets/app.js')),
