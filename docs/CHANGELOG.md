@@ -1,4 +1,4 @@
-## v0.7.1 — Reliability & INFO editing hotfix (DRAFT; not deployed)
+## v0.7.1 — Reliability & INFO editing hotfix (operator-deployed 2026-11-24; end-to-end acceptance pending)
 - #2: orphan media cleanup uses one shared readwrite IndexedDB transaction over queue + media.
 - #3: local durable commit is independent of subsequent UI refresh; explicit audio retry preserves op_id.
 - #4: TEAM/TECH add form retains values after failed enqueue.
@@ -7,7 +7,8 @@
 - #11: async list refresh preserves a user-selected older incident and ignores stale responses.
 - WordPress plugin v0.7.1 + coordinated Google Apps Script update required; Cloudflare Worker unchanged.
 - IndexedDB schema remains v2; no migrations or queue resets. This is a development candidate; no production release approval.
-- Targeted automated regression tests passed in isolation; real iPhone Safari and Google Sheets acceptance tests are still required.
+- Targeted automated regression tests passed in isolation; production read-only verification confirmed the embedded JS build and 8/8 isolated checks passed. Real iPhone Safari and Google Sheets/Drive acceptance tests are still required. The live GAS revision is not independently verified.
+- Source synchronized to GitHub `main` through merged PR #13; that merge did not perform deployment.
 - See [upgrade guide](UPGRADE_V071_BG.md) and [roadmap](ROADMAP.md).
 
 ## v0.7.0 - Adaptive Google Sheets template and INFO (23 November 2026)
