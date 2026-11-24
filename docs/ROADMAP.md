@@ -1,6 +1,6 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status:** v0.7.1 is operator-reported production. v0.7.2 is implemented as a review candidate in `feature/v0.7.2-performance-usability` (NOT deployed); v0.8.0 remains proposed. Full v0.7.1 acceptance is not complete.
+> **Status:** operator reports v0.7.2 deployed in production (WP 0.7.2 / JS 0.7.2-c6f4de4c832a). v0.7.2.1 is a tested hotfix candidate in `fix/v0.7.2.1-hotfix`, NOT deployed. v0.8.0 remains proposed.
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
@@ -21,12 +21,13 @@ The app maintains the operational record of search-and-rescue incidents. **Corre
 
 ## 2. Proposed release sequence
 
-v0.7.1 was **deployed to production by the operator on 2026-11-24**, confirmed by a read-only installed-source/public-response check. v0.7.2 and v0.8.0 are **proposals** without guaranteed dates. A deployment report is not full functional acceptance.
+Operator reports **v0.7.1 and subsequently v0.7.2 deployed to production on 2026-11-24**. Existing GitHub `main` is behind the production baseline. v0.7.2.1 and v0.8.0 are proposals until accepted and deployed; a deployment report is not full end-to-end acceptance.
 
 | Proposed release | Objective | Required work / tickets | Exit criteria |
 | --- | --- | --- | --- |
 | **v0.7.1 — Reliability Hotfix (production; acceptance pending)** | Protect locally entered and recorded operational data | P1 [#2](https://github.com/issaev/bg-voice-logger/issues/2), [#3](https://github.com/issaev/bg-voice-logger/issues/3), [#4](https://github.com/issaev/bg-voice-logger/issues/4), [#5](https://github.com/issaev/bg-voice-logger/issues/5), [#8](https://github.com/issaev/bg-voice-logger/issues/8), [#11](https://github.com/issaev/bg-voice-logger/issues/11); retain Safari/IndexedDB regression checks | No known reproducible data-loss/false-sync paths in isolation; safe retry and stable op IDs; INFO text editor works; Safari verification recorded |
-| **v0.7.2 — Performance & Usability (blocked by #15)** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12), **[#15](https://github.com/issaev/bg-voice-logger/issues/15) read timeout**; assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
+| **v0.7.2 — Performance & Usability (operator-deployed; known #15/#17 problems)** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12), **[#15](https://github.com/issaev/bg-voice-logger/issues/15) read timeout**; assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
+| **v0.7.2.1 — Reliability & voice-log continuity (release candidate)** | Preserve voice LOG visibility and repair timeout/error handling | P1 [#15](https://github.com/issaev/bg-voice-logger/issues/15), [#17](https://github.com/issaev/bg-voice-logger/issues/17), [#18](https://github.com/issaev/bg-voice-logger/issues/18); [hotfix guide](UPGRADE_V0721_BG.md) | 35s read-only timeout with safe stage budgets, trace without operational data, one voice event from review to ack, no stale generic errors, iPhone + Sheets regression pass before deployment |
 | **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7), **[#16](https://github.com/issaev/bg-voice-logger/issues/16) measured GAS read optimization**; bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
 
 ### Production status update — 2026-11-24
@@ -55,6 +56,10 @@ The report was obtained without modifying production code, data, caches or queue
 - [ ] **UI/queue regression.** Tests for no-speech STT, denied local storage, offline/resume and preserved audio original.
 
 **Evidence level:** #2–#5 were reproduced using isolated Node functions/mocked dependencies; #8 and #11 have user reports with identifiable problematic UI code paths. User feedback says iPhone v0.7.0 works well in practice; preserve that behavior and keep Safari/IndexedDB **regression** testing rather than assuming active failure. This is **not** evidence that production data was already lost. See the issue descriptions for reproduction and acceptance criteria.
+
+### v0.7.2.1 hotfix status (2026-11-24)
+
+Draft hotfix `fix/v0.7.2.1-hotfix` combines the continuous LOG stream from PR #19 with #15 transport/diagnostics and #17 scoped-error fixes. Local targeted PHP/JS/GAS tests pass; the full isolated suite is **22/32 PASS** with the same 10 inherited failures. **Production remains v0.7.2** until explicit release approval and hands-on iPhone/Sheets acceptance. The 35s timeout does not resolve a 115s GAS execution; profiling for #16 remains on the v0.8.0 track.
 
 ### v0.7.2 — performance and usability work (some changes require coordinated GAS deployment)
 
