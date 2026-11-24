@@ -1,8 +1,25 @@
-# BG Voice Logger — v0.8.2.1 acceptance candidate
+# BG Voice Logger — v0.8.2.1 production (acceptance pending)
 
-## v0.8.2.1 — WordPress-only icon refinement (not deployed)
+## Production status — 2026-11-24
 
-Replaces the custom install glyph from v0.8.2 (#40) with the official Google Material Icons Rounded `install_mobile` SVG (Apache-2.0); original geometry, navy/white/red colors, visible “Инсталирай”, existing compact bottom position. No external assets or changes to the install mechanism or IndexedDB. WordPress 0.8.2.1, JS `0.8.2.1-188c8b66fb21`; GAS remains 0.8.2, Cloudflare STT unchanged. If upgrading directly from an older backend, install GAS 0.8.2 first. No deployment, no merge. Actual mobile acceptance remains pending.
+Operator confirmed deployment of the latest **WordPress v0.8.2.1** to production on 2026-11-24. This is an operator-reported installation, not completed acceptance or an independently verified live build.
+
+| Component | Version / status |
+|---|---|
+| WordPress | 0.8.2.1 — operator-reported production |
+| JavaScript | `0.8.2.1-188c8b66fb21` — expected build; verify on real devices |
+| Google Apps Script | 0.8.2 — required/expected backend, live revision not independently verified |
+| Cloudflare STT | `sar-bg-v1` — unchanged code, live health not independently verified |
+
+Source release commit: `3c59f38752c4b7f5b4b3fb5722b20ee8b8ee30ce` ([PR #42](https://github.com/issaev/bg-voice-logger/pull/42), stacked on [PR #41](https://github.com/issaev/bg-voice-logger/pull/41)). [WordPress ZIP](https://github.com/issaev/bg-voice-logger/raw/e23558ac9e99fb268b366e1b927efbb42c8bf4d5/bg-voice-logger-v0.8.2.1.zip) · [GAS/Worker ZIP](https://github.com/issaev/bg-voice-logger/raw/ffd65622ff037ad65531dbc10119357edce23c8d/bg-voice-logger-v0.8.2-code.zip).
+
+**Next gate: acceptance testing.** Freeze feature work; run the full Node/PHP regression suite (investigate the ten inherited failing tests; no claim they are resolved), real Android/iPhone/PWA, Google Sheets/Drive, authentication and identity isolation, offline/retry/duplicate and media integrity, and paired performance tests. Verify actual GAS version and Range behavior. Background sync remains best effort, not guaranteed while locked. The original transient network failure root cause remains unconfirmed. Keep issues open until their acceptance criteria pass. No merge to main, deployment action, or runtime code change was performed in this status update; main remains v0.7.2.1 pending approval.
+
+Historical release notes below describe their status at authoring time, not the current production state.
+
+## v0.8.2.1 — WordPress-only icon refinement (operator-reported production; acceptance pending)
+
+Replaces the custom install glyph from v0.8.2 (#40) with the official Google Material Icons Rounded `install_mobile` SVG (Apache-2.0); original geometry, navy/white/red colors, visible “Инсталирай”, existing compact bottom position. No external assets or changes to the install mechanism or IndexedDB. WordPress 0.8.2.1, JS `0.8.2.1-188c8b66fb21`; GAS remains 0.8.2, Cloudflare STT unchanged. If upgrading directly from an older backend, install GAS 0.8.2 first. Deployment has been reported by the operator; no merge. Actual mobile acceptance remains pending.
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script

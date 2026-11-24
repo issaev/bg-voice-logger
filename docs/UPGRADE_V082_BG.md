@@ -1,11 +1,13 @@
-# BG Voice Logger v0.8.2 — кандидат за приемателно тестване
+# BG Voice Logger v0.8.2.1 — приемателно тестване след докладван deployment
+
+**Статус 24.11.2026:** операторът потвърди, че v0.8.2.1 е в production. Това не е независимо потвърждение на JS/GAS/Worker или приемане на версията. Следва цялостно тестване. Инструкциите по-долу остават за повторна инсталация/проверка, ако се наложи.
 
 ## Инсталиране (Google Apps Script → WordPress)
 1. Запази текущите WP ZIP, GAS revision/URL, конфигурация и CF Worker revision. Не обновявай по време на реална акция или активен запис. Не деинсталирай плъгина, не изтривай IndexedDB, опашка, снимки или аудио.
 2. В същия Google Apps Script проект замени Code.gs със съдържанието на apps-script/Code.gs от backend ZIP. Save → Deploy → Manage deployments → Edit → New version → Deploy. Запази същия /exec URL и всички Script Properties, включително BVLOG_SHARED_SECRET и BVLOG_CREATE_*. Запази текущите OAuth scopes, включително script.external_request за аудио Range, ако са описани изрично. Не давай публичен достъп до оперативните документи.
-3. В WordPress → Plugins → Add New → Upload Plugin качи bg-voice-logger-v0.8.2.zip → Replace current with uploaded. Не променяй настройките.
+3. В WordPress → Plugins → Add New → Upload Plugin качи bg-voice-logger-v0.8.2.1.zip → Replace current with uploaded. Не променяй настройките.
 4. Cloudflare STT Worker не е променян. В ZIP е приложен за пълнота. Ако вече работи sar-bg-v1, не го обновявай. Не заменяй реалните bindings/secrets с примерния wrangler.toml.
-5. Провери WP 0.8.2, JS 0.8.2-39896a2667b4, GAS 0.8.2. Test connection и актуализирай PWA assets чрез reload/повторно отваряне, НЕ чрез Clear site data.
+5. Провери WP 0.8.2.1, JS 0.8.2.1-188c8b66fb21, GAS 0.8.2. Test connection и актуализирай PWA assets чрез reload/повторно отваряне, НЕ чрез Clear site data.
 
 ## Приемателно тестване (само синтетични акции)
 - Изпълни пълната Node и PHP регресия; сравни наследените 10 failures, не ги считай за решени или безвредни само защото са наследени. Новите локални тестове: tests/test-v081-next.js и tests/test-v082-test-candidate.js.
