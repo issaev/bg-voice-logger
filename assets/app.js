@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.2.1-188c8b66fb21';
+  const BVLOG_RUNNING_BUILD = '0.8.2.2-3e65539c2fb5';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -528,6 +528,11 @@
     const [audioBusy,setAudioBusy]=useState('');
     const [unsavedAudio,setUnsavedAudio]=useState(null);
     const [docLoading,setDocLoading]=useState(false);
+    const [readActivity,setReadActivity]=useState(false);
+    // One active incident/identity only; never cache private data in HTTP or SW.
+    const tabCacheRef=useRef(new Map());
+    const prefetchOrder=['LOG','INFO','TECH','TEAM'];
+    const tabRefreshMs=120000;
     const [docLoadError,setDocLoadError]=useState('');
     const [lastFreshAt,setLastFreshAt]=useState('');
     const documentRequestRef=useRef(0);
@@ -778,8 +783,8 @@
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
       docsRequestRef.current++;documentRequestRef.current++;docRef.current=null;createScopeRef.current++;
-      clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
-      documentReadInFlightRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};
+      resetSessionReads();
+      viewRef.current={id:'',tab:'LOG',hasData:false};
       setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
       createPendingRef.current=null;setPendingCreate(null);setCreating(false);
       selectedDocRef.current='';selectedDocManualRef.current=false;
@@ -803,8 +808,7 @@
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
         docsRequestRef.current++;documentRequestRef.current++;createScopeRef.current++;
-        clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
-        documentReadInFlightRef.current=null;docRef.current=null;
+        resetSessionReads();docRef.current=null;
         viewRef.current={id:'',tab:'LOG',hasData:false};pageRef.current='LOG';
         setDoc(null);setMode('choose');setData(null);setPage('LOG');
         setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
@@ -953,54 +957,99 @@
     // Snapshot keys are tab-scoped in the same per-operator database. The old
     // whole-document snapshot is a read-only compatibility fallback.
     function tabSnapshotKey(id,tab){return id+':'+tab;}
-    function hasTabData(value,tab){
-      return !!value&&Array.isArray(value[tab]);
+    function hasTabData(value,tab){return !!value&&Array.isArray(value[tab]);}
+    function resetSessionReads(){
+      clearReadRetry();documentRequestRef.current++;
+      documentReadInFlightRef.current?.controller?.abort();
+      documentReadInFlightRef.current=null;tabCacheRef.current.clear();
+      setReadActivity(false);setDocLoading(false);
     }
     function resetView(id,tab){
       viewRef.current={id,tab,hasData:false};
       setData(null);setCachedView(false);setLastFreshAt('');setDocLoadError('');
     }
-    async function loadDocument(id,automaticRetry=false,requestedTab,force=false) {
-      const tab=['LOG','INFO','TEAM','TECH'].includes(requestedTab)?requestedTab:pageRef.current;
+    function currentTabEntry(id,tab){
+      const entry=tabCacheRef.current.get(tab);
+      return entry&&entry.scope===DB&&entry.id===id?entry:null;
+    }
+    function rememberTab(id,tab,patch){
+      const entry=Object.assign({},currentTabEntry(id,tab)||{},patch,{id,scope:DB});
+      tabCacheRef.current.set(tab,entry);return entry;
+    }
+    function paintTab(id,tab,entry){
+      if(!entry||!hasTabData(entry.data,tab)||entry.scope!==DB||entry.id!==id||
+        docRef.current?.id!==id||pageRef.current!==tab)return false;
+      setData(entry.data);
+      setCachedView(!entry.live||!!entry.dirty||!navigator.onLine||
+        Date.now()-Date.parse(entry.stamp||'')>=tabRefreshMs);
+      setLastFreshAt(entry.live?entry.stamp:'');
+      setDocLoadError(entry.error||'');
+      viewRef.current={id,tab,hasData:true,stamp:entry.stamp,data:entry.data};return true;
+    }
+    function invalidateTabs(id,tabs){
+      if(id!==docRef.current?.id)return;
+      for(const tab of tabs){
+        const entry=currentTabEntry(id,tab);
+        if(entry)rememberTab(id,tab,{dirty:true,retryAt:0});
+      }
+      // A response started before a confirmed write must not overwrite its refresh.
+      const flight=documentReadInFlightRef.current;
+      if(flight&&flight.id===id&&tabs.includes(flight.tab)){
+        documentRequestRef.current++;flight.controller?.abort();
+        documentReadInFlightRef.current=null;setReadActivity(false);setDocLoading(false);
+      }
+      if(tabs.includes(pageRef.current))setCachedView(true);
+    }
+    async function loadDocument(id,automaticRetry=false,requestedTab,force=false,background=false) {
+      const tab=prefetchOrder.includes(requestedTab)?requestedTab:pageRef.current;
       const scope=DB;
-      if(id!==docRef.current?.id||tab!==pageRef.current)return false;
+      if(id!==docRef.current?.id||(!background&&tab!==pageRef.current))return false;
       const previousFlight=documentReadInFlightRef.current;
-      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab)return false;
-      if(!automaticRetry)clearReadRetry();
+      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab){
+        if(!background){previousFlight.background=false;setDocLoading(true);}
+        return false;
+      }
+      if(background&&previousFlight)return false;
+      if(!background&&!automaticRetry)clearReadRetry();
       const request=++documentRequestRef.current;
       if(previousFlight?.controller)previousFlight.controller.abort();
       const controller=typeof AbortController==='function'?new AbortController():null;
-      documentReadInFlightRef.current={id,tab,request,controller};
-      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id&&tab===pageRef.current;
+      const flight={id,tab,request,controller,background};
+      documentReadInFlightRef.current=flight;
+      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id;
+      const visible=()=>current()&&tab===pageRef.current;
       const key=tabSnapshotKey(id,tab);
-      if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
-      setDocLoading(true);setDocLoadError('');
+      setReadActivity(true);
+      if(visible()){
+        if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
+        if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+          paintTab(id,tab,currentTabEntry(id,tab));
+        setDocLoading(true);
+        // Keep a real error visible while retrying instead of flashing it off.
+        if(!viewRef.current.hasData)setDocLoadError('');
+      }
       async function showCached(){
+        if(currentTabEntry(id,tab)?.data)return true;
         try{
           let snap=await database('get','snapshots',key);
           if(!current())return false;
           if(!snap||!hasTabData(snap.data,tab))snap=await database('get','snapshots',id);
           if(!current()||!snap||!hasTabData(snap.data,tab))return false;
-          if(!viewRef.current.hasData){
-            setData(snap.data);setCachedView(true);
-            viewRef.current={id,tab,hasData:true};
-          }
+          const entry=rememberTab(id,tab,{data:snap.data,stamp:snap.updated||'',live:false});
+          if(visible()&&!viewRef.current.hasData)paintTab(id,tab,entry);
           return true;
         }catch(ignore){return false;}
       }
       try{
+        await showCached();
+        if(!current())return;
         if(!navigator.onLine){
-          const found=await showCached();
-          if(current()){
+          if(visible()){
             setCachedView(true);
-            if(!found&&!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
+            if(!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
           }
           return;
         }
-        // Paint an existing private snapshot quickly, but only live data can
-        // set the fresh timestamp. No private HTTP/Service Worker caching.
-        if(!viewRef.current.hasData)await showCached();
-        if(!current())return;
         const separator=String(CFG.api||'').includes('?')?'&':'?';
         const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab,'GET',undefined,controller?.signal);
         if(!r.ok||r.id&&r.id!==id||!hasTabData(r.data,tab)||
@@ -1008,31 +1057,73 @@
           throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
         if(!current())return;
         const stamp=new Date().toISOString();
-        setData(r.data);setCachedView(false);setLastFreshAt(stamp);
-        viewRef.current={id,tab,hasData:true};
-        readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        const entry=rememberTab(id,tab,{data:r.data,stamp,live:true,dirty:false,error:'',retryAt:0,failures:0});
+        if(visible()){
+          // Do not replace an already visible edit target while a speculative
+          // read is completing. Apply on the next safe refresh/tab visit.
+          if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+            paintTab(id,tab,entry);
+          readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        }
         try{await database('put','snapshots',{id:key,data:r.data,updated:stamp});}
-        catch(localError){if(current())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
+        catch(localError){if(visible())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
         if(!current())return;
-        if(!viewRef.current.hasData)await showCached();
+        if(!currentTabEntry(id,tab)?.data)await showCached();
         if(!current())return;
-        const scheduled=scheduleReadRetry(id,e,automaticRetry);
-        setDocLoadError('Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
-          (viewRef.current.hasData?' Показани са последните налични данни.':'')+
-          (scheduled?' Автоматичен повторен опит е планиран.':''));
-        const previous=readBackoffRef.current;
-        const attempts=(previous.id===id?previous.attempts:0)+1;
-        readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        const previous=currentTabEntry(id,tab);
+        const scheduled=visible()&&scheduleReadRetry(id,e,automaticRetry);
+        const message='Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
+          (previous?.data?' Показани са последните налични данни.':'')+
+          (scheduled?' Автоматичен повторен опит е планиран.':'');
+        const failures=(previous?.failures||0)+1;
+        const entry=rememberTab(id,tab,{dirty:true,error:message,failures,
+          retryAt:Date.now()+Math.min(900000,tabRefreshMs*Math.pow(2,Math.min(failures-1,3)))});
+        if(visible()){
+          if(entry.data&&(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false))paintTab(id,tab,entry);
+          setDocLoadError(message);setCachedView(!!entry.data);
+          const old=readBackoffRef.current,attempts=(old.id===id?old.attempts:0)+1;
+          readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        }
       }finally{
-        if(documentReadInFlightRef.current?.request===request)documentReadInFlightRef.current=null;
-        if(current())setDocLoading(false);
+        if(documentReadInFlightRef.current?.request===request){
+          documentReadInFlightRef.current=null;setReadActivity(false);
+          if(current())setDocLoading(false);
+        }
       }
+    }
+    function nextPrefetchTab(id){
+      const now=Date.now();
+      const eligible=tab=>{
+        const entry=currentTabEntry(id,tab);
+        if(entry?.retryAt>now)return false;
+        // A scheduled foreground retry owns the active tab; other tabs may
+        // still refresh without repeatedly competing for that failed request.
+        const retry=readRetryRef.current;
+        return !(tab===pageRef.current&&retry.id===id&&!retry.exhausted);
+      };
+      // Finish warming all tabs before revisiting a warmed one.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&!currentTabEntry(id,tab)?.live)return tab;
+      // Dirty data first, then oldest successful refresh. The navigation order
+      // breaks ties, and slow requests cannot starve the last tab.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&currentTabEntry(id,tab)?.dirty)return tab;
+      const due=prefetchOrder.filter(tab=>{
+        const entry=currentTabEntry(id,tab);
+        return eligible(tab)&&entry&&now-Date.parse(entry.stamp||'')>=tabRefreshMs;
+      });
+      due.sort((a,b)=>Date.parse(currentTabEntry(id,a).stamp)-Date.parse(currentTabEntry(id,b).stamp));
+      return due[0]||'';
+    }
+    function applyDeferredTab(id){
+      const tab=pageRef.current,entry=currentTabEntry(id,tab);
+      if(entry?.data&&entry.live&&!entry.dirty&&viewRef.current.data!==entry.data&&
+        refreshRef.current?.safeToPaint!==false)paintTab(id,tab,entry);
     }
     async function startSession(chosen,bootstrap) {
       if(!chosen||!checkOperatorName())return;
-      clearReadRetry();documentRequestRef.current++;
-      documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;
+      resetSessionReads();
       setDoc(chosen);docRef.current=chosen;pageRef.current='LOG';
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
       setPage('LOG');setMode('session');resetView(chosen.id,'LOG');setError('');setSecondInfo(false);
@@ -1040,8 +1131,7 @@
       if(bootstrap&&bootstrap.id===chosen.id&&Array.isArray(bootstrap.loaded_tabs)&&
         bootstrap.loaded_tabs.includes('LOG')&&hasTabData(bootstrap.data,'LOG')){
         const stamp=new Date().toISOString();
-        setData(bootstrap.data);setCachedView(false);setLastFreshAt(stamp);setDocLoading(false);
-        viewRef.current={id:chosen.id,tab:'LOG',hasData:true};
+        paintTab(chosen.id,'LOG',rememberTab(chosen.id,'LOG',{data:bootstrap.data,stamp,live:true,dirty:false,error:''}));
         try{await database('put','snapshots',{id:tabSnapshotKey(chosen.id,'LOG'),data:bootstrap.data,updated:stamp});}
         catch(ignore){}
       }else await loadDocument(chosen.id,false,'LOG');
@@ -1052,8 +1142,21 @@
       if(editing||logEditor||rowAdd||infoAdding>=0){
         setError('Запази или откажи текущата редакция, преди да смениш раздела.');return;
       }
-      clearReadRetry();pageRef.current=tab;setPage(tab);resetView(docRef.current.id,tab);
-      loadDocument(docRef.current.id,false,tab);
+      const id=docRef.current.id;
+      clearReadRetry();readBackoffRef.current={id,attempts:0,nextAt:0};
+      pageRef.current=tab;setPage(tab);resetView(id,tab);
+      const entry=currentTabEntry(id,tab);
+      const shown=paintTab(id,tab,entry);
+      const fresh=shown&&entry.live&&!entry.dirty&&navigator.onLine&&Date.now()-Date.parse(entry.stamp)<tabRefreshMs;
+      setDocLoading(false);
+      // A warm tab renders without a new request. An uncached user choice
+      // supersedes speculative work; an identical in-flight read is adopted.
+      if(!fresh){
+        // Cached content is usable immediately. Do not abort a different tab's
+        // speculative read merely to revalidate content we already have.
+        if(!shown||!documentReadInFlightRef.current||documentReadInFlightRef.current.tab===tab)
+          loadDocument(id,false,tab);
+      }
     }
     async function newDocument() {
       if(createFlightRef.current||!checkOperatorName())return;
@@ -1213,6 +1316,7 @@
         hasLease=await syncLease(leaseOwner,false,scope);
         if(!hasLease)return;
         const items=(await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
+        const touchedTabs=new Set();
         let touchedCurrent=false;
         for(const o of items){
           if(DB!==scope)return;
@@ -1295,7 +1399,17 @@
             if(r.ok){
               work.state='synced';work.error='';work.url=r.url||'';
               delete work.blob;delete work.preview_blob;delete work.next_retry;
-              if(docRef.current&&o.doc_id===docRef.current.id)touchedCurrent=true;
+              if(docRef.current&&o.doc_id===docRef.current.id){
+                touchedCurrent=true;
+                const affected=o.kind==='field'||o.kind==='add_row'?o.sheet:
+                  o.kind==='audio_upload'&&o.target_kind==='field'?o.field_sheet:
+                  ['log','log_change','photo','audio_upload'].includes(o.kind)?'LOG':'';
+                // Unknown operation types conservatively invalidate all tabs.
+                if(prefetchOrder.includes(affected))touchedTabs.add(affected);
+                else for(const tab of prefetchOrder)touchedTabs.add(tab);
+                // Invalidate at ACK, not just after the whole queue drains.
+                invalidateTabs(o.doc_id,[...touchedTabs]);
+              }
             }else if(['waiting_for_log','busy','incomplete_upload'].includes(r.code)){
               work.state='pending';work.error=r.message||'Изчаква се потвърждение.';
               work.attempts=(work.attempts||0)+1;
@@ -1331,8 +1445,10 @@
           o.state=work.state;
         }
         await refreshQueue();
-        // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
-        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id,false,undefined,true);
+        // Acknowledgments invalidate tabs. The background scheduler reads them
+        // after the write lease is released; no network read holds that lease.
+        if(touchedCurrent&&docRef.current&&DB===scope&&touchedTabs.has(pageRef.current))
+          setCachedView(true);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
@@ -1370,8 +1486,7 @@
         loadDocs();syncAll();processAudioQueue();
         const refresh=refreshRef.current;
         if(readRetryRef.current.id)scheduleReadRetryTimer();
-        else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
-          !documentReadInFlightRef.current)refresh.load(refresh.id);
+        if(refresh&&refresh.id===docRef.current?.id)invalidateTabs(refresh.id,prefetchOrder);
       }};
       const visibility=()=>{
         if(document.hidden){requestBackgroundSync();return;}
@@ -1381,7 +1496,10 @@
         if(event.data&&event.data.type==='BVLOG_SYNC_UPDATED'){
           refreshQueue();
           const refresh=refreshRef.current;
-          if(refresh&&refresh.ready&&!documentReadInFlightRef.current)refresh.load(refresh.id);
+          if(refresh&&refresh.id&&refresh.id===docRef.current?.id){
+            invalidateTabs(refresh.id,prefetchOrder);
+            // Let the same background scheduler refresh the invalidated tabs.
+          }
         }
       };
       if(navigator.serviceWorker)navigator.serviceWorker.addEventListener('message',swUpdated);
@@ -1393,27 +1511,39 @@
 
     // Keep the timer stable across queue state changes and UI re-renders.
     // A fresh guard snapshot prevents a 45s queue refresh from endlessly postponing polling.
-    refreshRef.current={id:doc&&doc.id,ready:mode==='session'&&online&&!docLoading&&
-      !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
-      !unsavedAudio&&!draft.trim()&&!photos.length&&!queueOpen&&!gallery&&!logSaving&&
-      !rowSaving&&!photoBusy&&
-      !queue.some(o=>doc&&o.doc_id===doc.id&&!['synced','cancelled'].includes(o.state)),
+    refreshRef.current={id:doc&&doc.id,
+      safeToPaint:!recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving,
+      prefetch:nextPrefetchTab,applyDeferred:applyDeferredTab,
+      backgroundReady:mode==='session'&&online&&!recording&&!fieldRecording&&!microphoneTest&&
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
+      ready:mode==='session'&&online&&!docLoading&&
+        !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
       load:loadDocument};
     useEffect(()=>{
       if(mode!=='session'||!doc||!online)return;
       const id=doc.id;
-      const timer=window.setInterval(()=>{
+      // All tabs refresh independently, roughly every two minutes after their
+      // last successful response. A cheap timer schedules, not polls the server.
+      // At most one speculative read runs, and active interaction/writes win.
+      const warm=()=>{
         const fresh=refreshRef.current;
         if(document.hidden||!navigator.onLine||syncingRef.current||
-           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id||
-           documentReadInFlightRef.current ||
-           (readBackoffRef.current.id===id && Date.now()<readBackoffRef.current.nextAt))return;
-        fresh.load(id);
-      },120000);
-      return()=>window.clearInterval(timer);
+          !fresh||fresh.id!==id||!fresh.backgroundReady||docRef.current?.id!==id||documentReadInFlightRef.current)return;
+        fresh.applyDeferred(id);
+        // Do not start a speculative read just before a due foreground retry.
+        const retry=readRetryRef.current;
+        if(retry.id===id&&!retry.exhausted&&retry.nextAt<=Date.now()&&fresh.ready)return;
+        const tab=fresh.prefetch(id);
+        if(tab)fresh.load(id,false,tab,false,true);
+      };
+      const warmTimer=window.setInterval(warm,1000);warm();
+      return()=>window.clearInterval(warmTimer);
     },[mode,doc&&doc.id,online]);
 
-    function closeSession() { if(recording||fieldRecording)return;clearReadRetry();documentRequestRef.current++;documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;setDocLoading(false);setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    function closeSession() { if(recording||fieldRecording)return;resetSessionReads();setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
@@ -2091,7 +2221,7 @@
     const title=doc&&doc.name||'Документ за координация на акция';
     function loadingRows(label){
       return h('div',{className:'bv-loading-rows',role:'status','aria-live':'polite'},
-        h('p',null,label||'Зареждане на данните от Google Sheets...'),
+        h('span',{className:'bv-sr-only'},label||'Зареждане на данните от Google Sheets...'),
         [0,1,2].map(i=>h('div',{className:'bv-skeleton-card',key:i,'aria-hidden':'true'},
           h('span',{className:'bv-skeleton-short'}),
           h('span',{className:'bv-skeleton-long'}),
@@ -2199,15 +2329,16 @@
       ) : h('main',{className:'bv-content bv-session'},
         h('div',{className:'bv-action-top'},
           h('div',null,h('span',{className:'bv-kicker'},B('AKTIVNA AKTSIYA')),h('h1',null,title),
-            doc&&doc.id&&h('a',{className:'bv-sheet-link',target:'_blank',rel:'noopener noreferrer',
-              href:doc.url||('https://docs.google.com/spreadsheets/d/'+encodeURIComponent(doc.id)+'/edit')},
-              icon('list',16),' ',B('Otvori tablitsata'))),
+            doc&&doc.id&&h('div',{className:'bv-sheet-row'},
+              h('a',{className:'bv-sheet-link',target:'_blank',rel:'noopener noreferrer',
+                href:doc.url||('https://docs.google.com/spreadsheets/d/'+encodeURIComponent(doc.id)+'/edit')},
+                icon('list',16),' ',B('Otvori tablitsata')),
+              h('span',{className:'bv-read-indicator'+(readActivity?' active':''),
+                role:'status','aria-live':'polite',title:readActivity?'Обновяване на данните':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Данни от Google Sheets'},
+                h('span',{className:'bv-loading-spinner','aria-hidden':'true'}),
+                h('span',{className:'bv-sr-only'},readActivity?'Обновяване на данните':'')))),
           h('div',{className:'bv-action-buttons'},
-            h('div',{className:'bv-fresh-label',role:'status'},
-              !online?'Офлайн копие':docLoadError?'Обновяването е неуспешно':
-              docLoading?(cachedView?'Кеширани данни · обновяване...':'Обновяване...'):
-                cachedView?'Локално копие · не е обновено':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
-              h('small',null,page+' · автоматично: на 2 мин. при безопасни условия')),
+            (!online||cachedView&&!readActivity)&&h('span',{className:'bv-fresh-label',role:'status'},!online?'Офлайн':'Локално копие'),
             h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
               title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
             h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
@@ -2218,11 +2349,9 @@
           h('div',{className:'bv-banner error',role:'alert'},
             'Липсващи листове в Google Sheets: '+data.MISSING_TABS.join(', ')+
             '. Наличните раздели остават достъпни; не записвай в липсващ лист.'),
-        docLoading&&h('div',{className:'bv-loading-inline',role:'status','aria-live':'polite'},
-          h('span',{className:'bv-loading-spinner','aria-hidden':'true'}),data?'Обновяване на данните...':'Зареждане от Google Sheets...'),
-        docLoadError&&!docLoading&&h('div',{className:'bv-load-error',role:'alert'},
+        docLoadError&&h('div',{className:'bv-load-error',role:'alert'},
           h('span',null,docLoadError),
-          h('button',{type:'button',onClick:()=>loadDocument(doc.id)},'Опитай отново')),
+          h('button',{type:'button',disabled:docLoading||!online,onClick:()=>loadDocument(doc.id)},'Опитай отново')),
         page==='LOG' ? h('section',{className:'bv-log-page'},
           h('div',{className:'bv-recorder'},
             h('div',{className:'bv-recorder-controls'},

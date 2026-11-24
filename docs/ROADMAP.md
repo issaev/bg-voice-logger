@@ -7,6 +7,17 @@
 > **Source of truth for issues:** [GitHub Issues](https://github.com/issaev/bg-voice-logger/issues).
 > **Deployment rule:** no WordPress, Google Apps Script, or Cloudflare production deployment without explicit approval.
 
+## v0.8.2.2 — all-tab background refresh and quiet indicator (candidate; not deployed)
+
+Issue #44. WordPress-only update, based on the production working baseline v0.8.2.1 in main. WordPress 0.8.2.2, JS `0.8.2.2-3e65539c2fb5`; GAS 0.8.2 and Cloudflare STT unchanged.
+
+- Initial priority LOG, INFO, TECH, TEAM (visible navigation order). One speculative read at a time. All tabs refresh independently about 120 seconds after their last successful response, rather than only the active tab. Dirty tabs prioritized; oldest due tab first so slow requests cannot starve another. Refresh intervals are best effort, not guaranteed deadlines.
+- Warm tab switches render the per-incident/per-operator memory snapshot immediately without an extra request when fresh. Missing tab requested explicitly takes priority; an existing identical in-flight read is adopted, not duplicated. Preserve IndexedDB per-tab and legacy fallback; no schema or queue change. Inactive responses update cache, not the visible tab. If a visible edit is in progress, defer repaint until safe.
+- Pause new speculative requests while recording, processing media/transcription, saving, syncing, hidden or offline. Failures back off per tab; visible errors and retry behavior remain. Confirmed writes invalidate the affected tab(s) immediately; SW sync and reconnect invalidate all. A pre-ACK response cannot overwrite newer data; refresh occurs after the foreground write lease is released.
+- Remove routine inline “Обновяване на данните...” and recurring freshness text. Small reserved-space spinner beside “Отвори таблицата”; only visible while a read is running, with accessible status. Real errors, offline/stale-copy labels, and skeleton placeholders for genuinely empty initial views remain.
+- Verification: 10 new focused simulated checks, 12 v0.8.2 and 9 v0.8.1 targeted checks passed; JS syntax parsed. Full PHP/Node suite, real browser UI, Google Drive/Sheets acceptance, network load and timing tests pending. More read requests than active-tab-only polling by design; measure latency and GAS quotas under concurrent users. No guaranteed locked-screen background work. Issue #43 photo quality is separate backlog and is not part of this patch.
+- No deployment, merge, changes to credentials, media, existing queue, or GAS/SW protocol.
+
 ## Production status — 2026-11-24
 
 Operator confirmed deployment of the latest **WordPress v0.8.2.1** to production on 2026-11-24. This is an operator-reported installation, not completed acceptance or an independently verified live build.
