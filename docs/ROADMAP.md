@@ -28,7 +28,7 @@ The operator reports **v0.7.1 → v0.7.2 → v0.7.2.1** successively deployed in
 | **v0.7.1 — Reliability Hotfix (production; acceptance pending)** | Protect locally entered and recorded operational data | P1 [#2](https://github.com/issaev/bg-voice-logger/issues/2), [#3](https://github.com/issaev/bg-voice-logger/issues/3), [#4](https://github.com/issaev/bg-voice-logger/issues/4), [#5](https://github.com/issaev/bg-voice-logger/issues/5), [#8](https://github.com/issaev/bg-voice-logger/issues/8), [#11](https://github.com/issaev/bg-voice-logger/issues/11); retain Safari/IndexedDB regression checks | No known reproducible data-loss/false-sync paths in isolation; safe retry and stable op IDs; INFO text editor works; Safari verification recorded |
 | **v0.7.2 — Performance & Usability** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12); assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
 | **v0.7.2.1 — Production hotfix (acceptance pending)** | Continuous voice LOG, scoped errors and Google read resilience | [#15](https://github.com/issaev/bg-voice-logger/issues/15), [#17](https://github.com/issaev/bg-voice-logger/issues/17), [#18](https://github.com/issaev/bg-voice-logger/issues/18); [Draft PR #20](https://github.com/issaev/bg-voice-logger/pull/20) | Operator-reported deployment; independently verify JS build/GAS revision, iPhone STT→confirmation→upload→Sheets echo, timeouts and safe error history before closing issues |
-| **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7), [#16](https://github.com/issaev/bg-voice-logger/issues/16) measured slow GAS reads; bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
+| **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7); bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
 
 ### Production status update — 2026-11-24
 
@@ -56,19 +56,6 @@ The report was obtained without modifying production code, data, caches or queue
 - [ ] **UI/queue regression.** Tests for no-speech STT, denied local storage, offline/resume and preserved audio original.
 
 **Evidence level:** #2–#5 were reproduced using isolated Node functions/mocked dependencies; #8 and #11 have user reports with identifiable problematic UI code paths. User feedback says iPhone v0.7.0 works well in practice; preserve that behavior and keep Safari/IndexedDB **regression** testing rather than assuming active failure. This is **not** evidence that production data was already lost. See the issue descriptions for reproduction and acceptance criteria.
-
-### v0.7.2.1 — deployed reliability hotfix (acceptance pending)
-
-The operator reports **v0.7.2.1 deployed in production** on 2026-11-24; GitHub source synchronization via [PR #14](https://github.com/issaev/bg-voice-logger/pull/14) and [PR #20](https://github.com/issaev/bg-voice-logger/pull/20) is being completed separately. Deployment is not full test acceptance. Expected JS build: `0.7.2.1-613947b7e695`; the live web response and deployed Apps Script revision were **not independently checked** in this update.
-
-- [#18](https://github.com/issaev/bg-voice-logger/issues/18): one stable voice LOG event across STT confirmation, queue upload, server acknowledgment and subsequent Google refresh, joined by `op_id`.
-- [#17](https://github.com/issaev/bg-voice-logger/issues/17): scoped errors for incident list, document refresh, synchronization and local persistence; successful reads must not conceal failed writes or unsaved local media.
-- [#15](https://github.com/issaev/bg-voice-logger/issues/15): WordPress `read` POST timeout increased only for read to 35s, with separate 15s redirect GET; bounded, sanitized diagnostics and guarded auto polling.
-- [#16](https://github.com/issaev/bg-voice-logger/issues/16): 115s+ Apps Script outlier remains unexplained; phase tracing enables investigation but **35s timeout cannot solve it**. Follow-up in v0.8.0.
-- Isolated verification: **22/32 test files pass**, same ten historical failures; actual iPhone Safari dictation and Sheets/Drive end-to-end checks still required before closing P1 issues.
-- No Cloudflare STT deployment or IndexedDB schema reset in this source-control update. Public GitHub source intentionally excludes private site/Drive settings.
-
-See [v0.7.2.1 upgrade/rollback guide](UPGRADE_V0721_BG.md).
 
 ### v0.7.2 — performance and usability work (some changes require coordinated GAS deployment)
 
