@@ -35,7 +35,7 @@ async function run(){
    CFG:{user:null,stt_mode:'none',stt_cloud:false},docRef:{current:null},docs:[],
    database:async()=>{commits++;return true;},refreshQueue:async()=>{throw Error('UI read failed');},
    setError:s=>saves.push(s),setLocalStoreError:s=>saves.push(s),setNotice:s=>uiNotices.push(s),B:s=>s,
-   navigator:{onLine:false},window:{setTimeout:()=>{}},console
+   navigator:{onLine:false},window:{setTimeout:()=>{}},requestBackgroundSync:()=>{},console
  };
  vm.createContext(context);
  vm.runInContext(enqueueText+'\nthis.enqueue=enqueue;',context);
@@ -66,7 +66,7 @@ async function run(){
 
  // Component tests: selectedDoc, free text on adjacent INFO columns, and footer warning.
  const patched=source.replace('    const waiting=queue.filter(o=>o.state!==\'synced\'',
-   '    window.__test={loadDocs,setSelectedDoc};\n    const waiting=queue.filter(o=>o.state!==\'synced\'');
+   '    window.__test={loadDocs,selectExistingDocument};\n    const waiting=queue.filter(o=>o.state!==\'synced\'');
  assert.notEqual(patched,source,'UI instrument anchor missing');
  const stateNames=Array.from(source.matchAll(/const \[([A-Za-z][A-Za-z0-9]*),\s*set[A-Za-z0-9]+\]=useState\(/g)).map(x=>x[1]);
  const state={};const refs={};let slot=0,refSlot=0,rendered=null;
@@ -89,7 +89,7 @@ async function run(){
  setState('authLoading',false);
  let tree=render();
  const refresh=win.__test.loadDocs();
- win.__test.setSelectedDoc('older');
+ win.__test.selectExistingDocument('older');
  assert.equal(getState('selectedDoc'),'older');
  requests.shift()(new Response(JSON.stringify({ok:true,documents:[{id:'newest',name:'New'}, {id:'older',name:'Old'}]}),{status:200}));
  await refresh;

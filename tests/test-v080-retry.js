@@ -123,7 +123,7 @@ async function testWrite(){
   const ctx={DB,database:db,syncingRef,navigator:{onLine:true},CFG:{auth_mode:'public'},authRef:{current:{}},
     docRef,refreshQueue:async()=>true,loadDocument:async id=>{readCalls.push(id);if(mode==='read_failed')throw Error('Failed to fetch');},
     B:x=>x,setSyncError:x=>errors.push(x),setError:x=>errors.push(x),window:{setTimeout:(fn,ms)=>{timers.push(ms);return wait(fn,ms);},clearTimeout:clear},
-    writeRetryTimerRef:{current:null},
+    writeRetryTimerRef:{current:null},uuid:()=> 'test-lease',syncLease:async()=>true,requestBackgroundSync:()=>{},
     api:async(path,method,payload)=>{
       apiCalls.push({id:payload.op_id,doc_id:payload.doc_id,path});
       if(mode==='transient'){

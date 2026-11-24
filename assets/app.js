@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-1090a8ff47d0';
+  const BVLOG_RUNNING_BUILD = '0.7.2.1-0963fd4edd8f';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -62,6 +62,8 @@
   // v0.6.2: media bytes are stored separately from mutable queue metadata.
   // Safari may reject structured-cloning a Blob into IndexedDB; use ArrayBuffer instead.
   const DB_SCHEMA = 2;
+  const SYNC_LEASE_MS = 180000;
+  const SYNC_TAG = 'bvlog-outbox-v1';
   const MEDIA_FIELDS = ['blob','preview_blob'];
   function hasQueueMedia(item, field) {
     const name=field||'blob';
@@ -154,6 +156,42 @@
         r.onsuccess=()=>{result=r.result;};
       }catch(e){try{tx.abort();}catch(ignore){}reject(e);}
     });
+  }
+  async function syncLease(owner, release=false, scope=DB) {
+    // Keep the existing v2 queue DB untouched: old production code must still
+    // be able to open it after rollback, without a VersionError.
+    const db=await new Promise((resolve,reject)=>{
+      const req=indexedDB.open('bg-voice-logger-sync-leases-v1',1);
+      req.onupgradeneeded=()=>{
+        if(!req.result.objectStoreNames.contains('locks'))req.result.createObjectStore('locks',{keyPath:'id'});
+      };
+      req.onsuccess=()=>resolve(req.result);
+      req.onerror=()=>reject(req.error||new Error('Не може да се отвори sync lock.'));
+      req.onblocked=()=>reject(new Error('Друг прозорец блокира sync lock.'));
+    });
+    return new Promise((resolve,reject)=>{
+      const tx=db.transaction('locks','readwrite');
+      const store=tx.objectStore('locks');
+      let held=false;
+      tx.oncomplete=()=>{db.close();resolve(held);};
+      tx.onabort=()=>{db.close();reject(tx.error||new Error('Локалното заключване за sync е недостъпно.'));};
+      const req=store.get(scope);
+      req.onsuccess=()=>{
+        const old=req.result;
+        if(release){
+          if(old&&old.owner===owner){store.delete(scope);held=true;}
+        }else if(!old||old.owner===owner||Number(old.expires||0)<Date.now()){
+          store.put({id:scope,owner,expires:Date.now()+SYNC_LEASE_MS});held=true;
+        }
+      };
+    });
+  }
+  function requestBackgroundSync() {
+    // Only register a tag. Never send operator identity, CSRF or incident data to SW.
+    if(!('serviceWorker' in navigator)||!window.isSecureContext)return;
+    navigator.serviceWorker.ready.then(reg=>{
+      if(reg.sync&&typeof reg.sync.register==='function')return reg.sync.register(SYNC_TAG);
+    }).catch(()=>{}); // Missing Background Sync is normal on iOS/Safari.
   }
   async function queueBlob(item, field) {
     const name=field||'blob';
@@ -370,8 +408,11 @@
     const [createId,setCreateId]=useState(uuid());
     const [selectedDoc,setSelectedDoc]=useState('');
     const docsRequestRef=useRef(0);
+    const selectedDocRef=useRef('');
+    const selectedDocManualRef=useRef(false);
     const [operatorName,setOperatorName]=useState(initialOperator());
     const [online,setOnline]=useState(navigator.onLine);
+    const [backgroundSyncAvailable,setBackgroundSyncAvailable]=useState(false);
     const [auth,setAuth]=useState(null);
     const [authLoading,setAuthLoading]=useState(true);
     const [loginChallenge,setLoginChallenge]=useState('');
@@ -601,6 +642,7 @@
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
       docsRequestRef.current++;
+      selectedDocRef.current='';selectedDocManualRef.current=false;
       CFG.csrf='';setAuth(null);setMode('choose');setDoc(null);setData(null);setDocs([]);setSelectedDoc('');setQueueOpen(false);setQueue([]);
       try{localStorage.removeItem('bvlog-last-identity');}catch(e){}
       if(window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
@@ -608,6 +650,12 @@
     }
 
 
+    function selectExistingDocument(id) {
+      selectedDocManualRef.current=true;
+      selectedDocRef.current=String(id||'');
+      setSelectedDoc(selectedDocRef.current);
+      setDocsError('');
+    }
     async function bindUserQueue(identity){
       if(!identity)return;
       const newDB=identity.kind==='google'&&identity.sub
@@ -615,14 +663,20 @@
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
         docsRequestRef.current++;
+        selectedDocRef.current='';selectedDocManualRef.current=false;
         DB=newDB;dbPromise=null;
       }
       try {
         const cached=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'null');
         const ownDocs=Array.isArray(cached)?cached:[];
-        setDocs(ownDocs);setSelectedDoc(ownDocs[0]?ownDocs[0].id:'');
-      } catch(e) {setDocs([]);setSelectedDoc('');}
+        setDocs(ownDocs);
+        if(!selectedDocManualRef.current){
+          selectedDocRef.current=ownDocs[0]?ownDocs[0].id:'';
+          setSelectedDoc(selectedDocRef.current);
+        }
+      } catch(e) {setDocs([]);if(!selectedDocManualRef.current){selectedDocRef.current='';setSelectedDoc('');}}
       await refreshQueue();
+      requestBackgroundSync();
     }
     async function importLegacyQueue(){
       if(!auth || auth.kind!=='google')return;
@@ -646,7 +700,8 @@
             await database('put','queue',Object.assign({},item,{state:item.state==='sending'?'pending':item.state}));count++;
           }
         }
-        await refreshQueue();setNotice('Импортирани '+count+' неприключени записи; старите данни са запазени.');
+        await refreshQueue();requestBackgroundSync();
+        setNotice('Импортирани '+count+' неприключени записи; старите данни са запазени.');
       }catch(e){setError('Неуспешен импорт: '+e.message);}
     }
     function changeOperatorName(value) {
@@ -680,10 +735,19 @@
           const types=r.action_types.filter(x=>typeof x==='string' && x.length && x!==B('Izberi ot menyuto'));
           if(types.length){setActionTypes(types);setNewType(old=>types.includes(old)?old:types[0]);}
         }
-        // Never override a selection made while this async request was pending.
-        setSelectedDoc(previous=>fresh.some(x=>x.id===previous)?previous:(fresh[0]?fresh[0].id:''));
+        // A user choice made during an in-flight request is never replaced with the latest incident.
+        const chosen=selectedDocRef.current;
+        if(chosen && fresh.some(x=>x.id===chosen)){
+          setSelectedDoc(chosen);setDocsError('');
+        }else if(selectedDocManualRef.current){
+          // If the chosen file disappeared, force an explicit fresh selection.
+          selectedDocRef.current='';setSelectedDoc('');
+          setDocsError('Избраната акция вече не е налична в папката. Избери друга акция.');
+        }else{
+          selectedDocRef.current=fresh[0]?fresh[0].id:'';
+          setSelectedDoc(selectedDocRef.current);setDocsError('');
+        }
         localStorage.setItem(localCacheKey('docs'),JSON.stringify(fresh));
-        setDocsError('');
       }catch(e){if(request===docsRequestRef.current && scope===DB)setDocsError(e.message);}
       finally{if(request===docsRequestRef.current && scope===DB)setDocsLoading(false);}
     }
@@ -799,7 +863,7 @@
         const r=await api('documents','POST',{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:createId});
         if (!r.ok) throw new Error(r.message||'Create failed');
         await loadDocs();
-        setSelectedDoc(r.document.id);
+        selectExistingDocument(r.document.id);
         setCreating(false);setCreateId(uuid());
         await startSession(r.document);
       } catch(e) { setError(e.message); }
@@ -811,6 +875,7 @@
       try {
         item.doc_name=item.doc_name || (docRef.current && docRef.current.id===item.doc_id ? docRef.current.name : (docs.find(d=>d.id===item.doc_id)||{}).name) || '';
         await database('put','queue',item);
+        if(item.state==='pending')requestBackgroundSync();
       }catch(e){setLocalStoreError(B('NE e zapazeno: ')+e.message);return false;}
       // A failed UI refresh does not undo a durable IndexedDB commit.
       try {
@@ -918,11 +983,16 @@
         (CFG.auth_mode!=='public' && (!authRef.current||authRef.current.offline_only)))return;
       const scope=DB;
       syncingRef.current=true;
+      const leaseOwner=uuid();
+      let hasLease=false;
       try {
+        hasLease=await syncLease(leaseOwner,false,scope);
+        if(!hasLease)return;
         const items=(await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
         let touchedCurrent=false;
         for(const o of items){
           if(DB!==scope)return;
+          if(!await syncLease(leaseOwner,false,scope))return;
           if(!['pending','sending'].includes(o.state)||o.kind==='audio')continue;
           if(o.next_retry && Date.now()<Date.parse(o.next_retry))continue;
           const work=Object.assign({},o,{state:'sending',upload_started:new Date().toISOString()});
@@ -952,12 +1022,13 @@
               const acknowledged=Math.max(0,Math.min(total,Math.floor(Number(o.parts_done)||0)));
               const startPart=acknowledged>=total?total-1:acknowledged;
               for(let part=startPart;part<total;part++){
-                if(DB!==scope)return;
+                if(DB!==scope||!await syncLease(leaseOwner,false,scope))return;
                 const piece=blob.slice(part*262144,(part+1)*262144);
                 const response=await api('audio','POST',{doc_id:o.doc_id,op_id:o.op_id,
                   target_id:o.target_id,target_kind:o.target_kind,mime:o.mime,
                   field_sheet:o.field_sheet,field_row:o.field_row,field_col:o.field_col,
                   part_index:part,part_count:total,base64:await photoBase64(piece)});
+                if(DB!==scope)return;
                 if(!response.ok)throw new Error(response.message||'Неуспешно качване на аудиото.');
                 work.parts_done=part+1;
                 await database('put','queue',work);
@@ -977,6 +1048,7 @@
               let preview=await queueBlob(o,'preview_blob');
               if(!preview){
                 const recovered=await preparePhoto(blob);
+                if(DB!==scope)return;
                 preview=recovered.previewBlob;
                 const saved=await database('put','queue',Object.assign({},work,{preview_blob:preview}));
                 Object.assign(work,saved);
@@ -987,6 +1059,7 @@
             }else{
               r=await api('operation','POST',payload);
             }
+            if(DB!==scope)return; // An identity switch must never write to the new user's queue.
             if(r.ok){
               work.state='synced';work.error='';work.url=r.url||'';
               delete work.blob;delete work.preview_blob;delete work.next_retry;
@@ -1002,6 +1075,7 @@
               work.state=o.kind==='photo'?'error':'conflict';work.current=r.current;work.error=r.message;
             }else{work.state='error';work.error=r.message||B('Greshka pri zapis');}
           }catch(e){
+            if(DB!==scope)return;
             work.error=e.message;
             work.attempts=(work.attempts||0)+1;
             if(isTransientRequestError(e)&&work.attempts<MAX_TRANSIENT_WRITE_ATTEMPTS){
@@ -1034,34 +1108,55 @@
            (op.kind==='audio_upload'&&latest.some(x=>x.op_id===op.target_id&&x.state==='synced'))));
         if(ready)window.setTimeout(()=>syncAll(),650);
         scheduleWriteRetry(latest);
+        if(latest.some(o=>o.state==='pending'&&o.kind!=='audio'))requestBackgroundSync();
         setSyncError('');
       }catch(e){setSyncError('Синхронизация: '+e.message);}
-      finally{syncingRef.current=false;}
+      finally{
+        if(hasLease)try{await syncLease(leaseOwner,true,scope);}catch(e){setLocalStoreError('Заключване на опашката: '+e.message);}
+        syncingRef.current=false;
+      }
     }
     useEffect(()=>{
       // Recover interrupted uploads in the same user queue without changing their UUIDs.
       // syncAll retries 'sending' as well as 'pending', but only after the page is reopened.
       if(CFG.auth_mode==='public'){
         try {const arr=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'null');
-          if(Array.isArray(arr)){setDocs(arr);setSelectedDoc(arr[0]?arr[0].id:'');}
+          if(Array.isArray(arr)){
+            setDocs(arr);if(!selectedDocManualRef.current){
+              selectedDocRef.current=arr[0]?arr[0].id:'';setSelectedDoc(selectedDocRef.current);
+            }
+          }
         } catch(e) { /* ignore invalid cache */ }
-        refreshQueue();loadDocs();
+        refreshQueue();loadDocs();requestBackgroundSync();
       }
       if ('serviceWorker' in navigator && CFG.sw_url && window.isSecureContext) {
-        navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()}).catch(()=>{});
+        navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()})
+          .then(reg=>{setBackgroundSyncAvailable(!!(reg.sync&&reg.sync.register));requestBackgroundSync();})
+          .catch(()=>setBackgroundSyncAvailable(false));
       }
-      const connection=()=>{setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {
+      const connection=()=>{if(navigator.onLine)requestBackgroundSync();setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {
         loadDocs();syncAll();processAudioQueue();
         const refresh=refreshRef.current;
         if(readRetryRef.current.id)scheduleReadRetryTimer();
         else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
           !documentReadInFlightRef.current)refresh.load(refresh.id);
       }};
-      const visibility=()=>{if (!document.hidden&&navigator.onLine){syncAll();processAudioQueue();scheduleReadRetryTimer();}};
+      const visibility=()=>{
+        if(document.hidden){requestBackgroundSync();return;}
+        if(navigator.onLine){syncAll();processAudioQueue();scheduleReadRetryTimer();}
+      };
+      const swUpdated=event=>{
+        if(event.data&&event.data.type==='BVLOG_SYNC_UPDATED'){
+          refreshQueue();
+          const refresh=refreshRef.current;
+          if(refresh&&refresh.ready&&!documentReadInFlightRef.current)refresh.load(refresh.id);
+        }
+      };
+      if(navigator.serviceWorker)navigator.serviceWorker.addEventListener('message',swUpdated);
       window.addEventListener('online',connection);window.addEventListener('offline',connection);
       document.addEventListener('visibilitychange',visibility);
       const timer=window.setInterval(()=>{if(navigator.onLine){syncAll();processAudioQueue();}},45000);
-      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);clearInterval(timer);clearReadRetry();if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);};
+      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);if(navigator.serviceWorker)navigator.serviceWorker.removeEventListener('message',swUpdated);clearInterval(timer);clearReadRetry();if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);};
     },[]);
 
     // Keep the timer stable across queue state changes and UI re-renders.
@@ -1501,6 +1596,7 @@
         return;
       }
       await database('put','queue',newer);await refreshQueue();
+      if(newer.state==='pending')requestBackgroundSync();
     }
     function voiceDraft(o) {
       return Object.prototype.hasOwnProperty.call(voiceReviewDrafts,o.op_id)?
@@ -1799,9 +1895,13 @@
           docsError&&h('div',{className:'bv-load-error',role:'alert'},
             'Списъкът с акции не е обновен: '+docsError,
             h('button',{type:'button',onClick:loadDocs,disabled:docsLoading},'Опитай отново')),
-          docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>setSelectedDoc(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
+          docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>selectExistingDocument(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
-          h(Button,{disabled:!selectedDoc,onClick:()=>startSession(docs.find(d=>d.id===selectedDoc))},icon('arrow',18),' ',B('Otvori aktsiyata'))),
+          h(Button,{disabled:!selectedDoc,onClick:()=>{
+            const chosen=docs.find(d=>d.id===selectedDocRef.current && d.id===selectedDoc);
+            if(!chosen){setDocsError('Избраната акция е променена или липсва. Избери я отново.');return;}
+            startSession(chosen);
+          }},icon('arrow',18),' ',B('Otvori aktsiyata'))),
         h('div',{className:'bv-or'},B('ILI')),
         h('div',{className:'bv-card'},
           h('button',{className:'bv-row spread bv-switch',onClick:()=>{if(!creating)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
@@ -2058,6 +2158,9 @@
           h('div',{className:'bv-row spread'},h('h3',null,'Локална опашка — '+waiting+' чакащи'),
             h('button',{className:'bv-icon-btn',onClick:()=>setQueueOpen(false)},icon('close',20))),
           h('p',{className:'bv-muted'},'Всеки запис е свързан с конкретен документ. Синхронизираните записи не могат да се изтрият оттук.'),
+          h('p',{className:'bv-muted'},backgroundSyncAvailable ?
+            'Фоновото изпращане е разрешено, но Android може временно да го спре. Непотвърдените записи остават локално.' :
+            'При заключване или спиране на приложението изпращането ще се възобнови автоматично след отваряне и връзка.'),
           CFG.auth_mode==='google'&&h('button',{className:'bv-retry-op',onClick:importLegacyQueue},'Импорт на стари записи от v0.2.2'),
           localSaveFailed&&h('div',{className:'bv-unsaved-audio',role:'alert'},
             h('strong',null,'Има незапазено аудио!'),
