@@ -76,6 +76,12 @@ Acceptance remains open for real iPhone Safari recording/review and refresh beha
 
 **Performance outcome:** count eliminated document requests and report comparable p50/error-rate changes. Do not promise a fixed percentage before measuring.
 
+### v0.8.0 — mobile usability candidate (not deployed)
+
+A separate source candidate in `feature/v0.8.0-mobile-ui` implements mobile-facing requests [#23](https://github.com/issaev/bg-voice-logger/issues/23), [#24](https://github.com/issaev/bg-voice-logger/issues/24), [#26](https://github.com/issaev/bg-voice-logger/issues/26) and [#28](https://github.com/issaev/bg-voice-logger/issues/28). It adds camera capture to existing LOG events (new events already had camera capture), new-event photo thumbnails, an accessible exact red header, and removes only the old import button. An isolated test confirms **all same-folder Google Sheets names already work in GAS**, so the name-filter request does not require a risky backend rewrite. The existing 250-file list ceiling and deployed GAS behavior still need real-data verification.
+
+Local test-file comparison: **25/35 PASS** vs **24/34 PASS** on the v0.7.2.1 baseline, with the same ten historical failures; no new failing test files. [Mobile UI plan and acceptance](PLAN_V080_UI_BG.md). Android/iPhone camera, Sheets folder selection, CSS layout and photo queue end-to-end acceptance are **pending**. This is separate from Draft PR #21 (GAS performance) and Draft PR #29 (retry); production remains operator-reported v0.7.2.1.
+
 ### v0.8.0 — backend and media changes (needs separate design and approval)
 
 - [ ] Confirm deployed Apps Script version before changing behavior. The **bundled** `bvlRead` can call `bvlRepairPhotoAnchors_` and potentially change embedded image anchors during a read; verify and remove read-side effects before authenticated read-only benchmark tests.
