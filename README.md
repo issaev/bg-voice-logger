@@ -1,14 +1,13 @@
-# BG Voice Logger — public source development candidate (v0.7.1)
+# BG Voice Logger — public source v0.7.1
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script
 Sheets/Drive backend, Cloudflare Worker speech-to-text gateway, tests and docs.
 
-**Public-source safety note:** This export is based on the uploaded v0.7.0
-bundle, but is **not byte-for-byte identical to the deployed plugin**.
+**Public-source safety note:** This repository contains the v0.7.1 code merged via [PR #13](https://github.com/issaev/bg-voice-logger/pull/13) on 2026-11-24. The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
 Operational Google Drive folder IDs and template spreadsheet IDs have been
 removed from source code and historical docs. No real secrets are included.
-No changes have been made to the live WordPress site or deployed Apps Script.
+The operator reports WordPress v0.7.1 deployed in production. Merging PR #13 updated GitHub only and did not deploy or modify the website or deployed Apps Script.
 This public snapshot is **not a production upgrade package** without separate
 configuration and end-to-end validation.
 
@@ -42,13 +41,9 @@ playback duration. The referenced `benchmark.py` runner was not supplied.
 
 ### Project status
 
-**Branch `fix/v0.7.1-reliability`: v0.7.1 development candidate, NOT deployed.**
-The current known live baseline is v0.7.0; user-reported iPhone usage is working.
-The new build fixes six P1 issues and requires a coordinated update of WordPress
-and Google Apps Script for unrestricted INFO comments. It does not touch Cloudflare STT.
-Read [v0.7.1 upgrade and rollback guide](docs/UPGRADE_V071_BG.md).
-Do not deploy before dedicated test-incident validation, actual iPhone testing,
-a backup of current deployments, and explicit release approval.
+**Source control:** `main` is aligned to the v0.7.1 source after PR #13 was merged. **Production:** the operator reported v0.7.1 / JS build `0.7.1-3d2b0c59217f` deployed on 2026-11-24; read-only public-response and 8/8 isolated regression checks passed. Real iPhone/Safari, Google Sheets/Drive and cross-device end-to-end acceptance is still pending; the deployed Apps Script revision has not been verified.
+
+Keep P1 acceptance issues open until full tests. The v0.7.1 release requires coordinated WordPress and Apps Script changes; it does not change Cloudflare STT or IndexedDB schema. See [v0.7.1 upgrade guide](docs/UPGRADE_V071_BG.md). Future deployments still require explicit approval, backups and queue-preserving rollback.
 
 ### License
 
