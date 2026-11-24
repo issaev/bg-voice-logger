@@ -78,6 +78,10 @@ Acceptance remains open for real iPhone Safari recording/review and refresh beha
 
 ### v0.8.0 — backend and media changes (needs separate design and approval)
 
+**v0.8.0-A development update (2026-11-24):** Draft GAS-only source candidate in `feature/v0.8.0a-gas-read-profiling` implements bounded backward `bvlEnd_` scans and reduces duplicate Google handle fetches, plus per-phase `read/list/create/operation` timings and a redacted trace analyzer. In a synthetic 10,000-row LOG fixture, only the last <=256 rows are scanned to find the end instead of 9,999 rows; the returned JSON is byte-equivalent to the v0.7.2.1 golden fixture. **This does not establish real runtime speedups.** Isolated tests: **25/35 PASS vs 23/33**, same ten historical failures. The installed production app remains **v0.7.2.1**. See [8A staging and measurement guide](PLAN_V080A_BG.md). Next is staging telemetry (including the unknown 115s doPost), then measured 8B architecture, then #7 streaming/audio. No deployment authorization inferred.
+
+
+
 - [ ] Confirm deployed Apps Script version before changing behavior. The **bundled** `bvlRead` can call `bvlRepairPhotoAnchors_` and potentially change embedded image anchors during a read; verify and remove read-side effects before authenticated read-only benchmark tests.
 - [ ] Reduce unnecessary full-sheet/index/legacy reads; investigate bounded/paginated history and bulk range access. Keep dynamic INFO discovery and write preconditions correct.
 - [ ] Cache template type options only with versioning/invalidation; never use a stale cache as permission to overwrite a field.
