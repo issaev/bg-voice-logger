@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-613947b7e695';
+  const BVLOG_RUNNING_BUILD = '0.7.2.1-1090a8ff47d0';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -283,7 +283,7 @@
     return !!(o&&docId&&o.doc_id===docId&&
       (o.kind==='log'||(o.kind==='audio'&&!(o.target&&o.target.kind==='field'))));
   }
-  function EntryStatus({status}) {
+  function EntryStatus({status,retryAt}) {
     const m = {
       synced:['check',B('Sinhronizirano'),'good'], pending:['clock',B('V opashkata'),'wait'],
       sending:['refresh',B('Izprashta se'),'wait'], local_error:['alert','Проблем с локалното аудио','bad'], conflict:['alert',B('Konflikt'),'bad'],
@@ -291,7 +291,8 @@
       voice_review:['edit','За потвърждение','wait'], review:['edit',B('Proveri poleto'),'wait'],
       photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
     };
-    const x = m[status]||['alert',B('Greshka'),'bad'];
+    const x = status==='pending'&&retryAt&&Date.parse(retryAt)>Date.now()?
+      ['clock','Автоматичен повторен опит','wait']:(m[status]||['alert',B('Greshka'),'bad']);
     return h('span',{className:'bv-status '+x[2]},icon(x[0],14),x[1]);
   }
   function Button({children,onClick,secondary,disabled,className,type}) {
@@ -932,6 +933,7 @@
             const payload=Object.assign({},o);
             for(const key of ['state','audio','error','created','current','mic_signal','quality',
               'blob','preview_blob','blob_media_id','preview_blob_media_id',
+              'attempts','next_retry','upload_started',
               'blob_size','preview_blob_size','blob_mime','preview_blob_mime','parts_done'])delete payload[key];
             let r;
             if(o.kind==='audio_upload'){
@@ -992,14 +994,25 @@
             }else if(['waiting_for_log','busy','incomplete_upload'].includes(r.code)){
               work.state='pending';work.error=r.message||'Изчаква се потвърждение.';
               work.attempts=(work.attempts||0)+1;
-              work.next_retry=new Date(Date.now()+10000).toISOString();
+              if(work.attempts>=MAX_TRANSIENT_WRITE_ATTEMPTS){
+                work.state='error';work.error='Автоматичните опити са изчерпани. Използвай ръчен Retry.';
+                delete work.next_retry;
+              }else work.next_retry=new Date(Date.now()+10000).toISOString();
             }else if(r.code==='conflict'||r.code==='row_moved'){
               work.state=o.kind==='photo'?'error':'conflict';work.current=r.current;work.error=r.message;
             }else{work.state='error';work.error=r.message||B('Greshka pri zapis');}
           }catch(e){
-            work.state='pending';work.error=e.message;
+            work.error=e.message;
             work.attempts=(work.attempts||0)+1;
-            work.next_retry=new Date(Date.now()+Math.min(600000,5000*Math.pow(2,Math.min(work.attempts-1,6)))).toISOString();
+            if(isTransientRequestError(e)&&work.attempts<MAX_TRANSIENT_WRITE_ATTEMPTS){
+              work.state='pending';
+              work.next_retry=new Date(Date.now()+writeRetryDelayMs(work.attempts)).toISOString();
+            }else{
+              work.state='error';
+              if(work.attempts>=MAX_TRANSIENT_WRITE_ATTEMPTS)
+                work.error='Автоматичните опити са изчерпани: '+work.error;
+              delete work.next_retry;
+            }
             try{await database('put','queue',work);}
             catch(localError){
               setError('Неуспешно локално запазване на опашката: '+localError.message);
@@ -1020,6 +1033,7 @@
            (op.kind==='photo'&&(!op.log_op_id||latest.some(x=>x.op_id===op.log_op_id&&x.state==='synced')))||
            (op.kind==='audio_upload'&&latest.some(x=>x.op_id===op.target_id&&x.state==='synced'))));
         if(ready)window.setTimeout(()=>syncAll(),650);
+        scheduleWriteRetry(latest);
         setSyncError('');
       }catch(e){setSyncError('Синхронизация: '+e.message);}
       finally{syncingRef.current=false;}
@@ -1036,12 +1050,18 @@
       if ('serviceWorker' in navigator && CFG.sw_url && window.isSecureContext) {
         navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()}).catch(()=>{});
       }
-      const connection=()=>{setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {loadDocs();syncAll();processAudioQueue();}};
-      const visibility=()=>{if (!document.hidden&&navigator.onLine){syncAll();processAudioQueue();}};
+      const connection=()=>{setOnline(navigator.onLine);if (navigator.onLine && (authRef.current || CFG.auth_mode==='public')) {
+        loadDocs();syncAll();processAudioQueue();
+        const refresh=refreshRef.current;
+        if(readRetryRef.current.id)scheduleReadRetryTimer();
+        else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
+          !documentReadInFlightRef.current)refresh.load(refresh.id);
+      }};
+      const visibility=()=>{if (!document.hidden&&navigator.onLine){syncAll();processAudioQueue();scheduleReadRetryTimer();}};
       window.addEventListener('online',connection);window.addEventListener('offline',connection);
       document.addEventListener('visibilitychange',visibility);
       const timer=window.setInterval(()=>{if(navigator.onLine){syncAll();processAudioQueue();}},45000);
-      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);clearInterval(timer);};
+      return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);clearInterval(timer);clearReadRetry();if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);};
     },[]);
 
     // Keep the timer stable across queue state changes and UI re-renders.
@@ -1882,7 +1902,7 @@
                     o.state==='synced'?
                       h('span',{className:'bv-status wait'},icon('refresh',14),
                         'Записано в Google · очаква опресняване'):
-                      h(EntryStatus,{status:o.state}),
+                      h(EntryStatus,{status:o.state,retryAt:o.next_retry}),
                     (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
                     playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
                       icon('play',15),' Чуй оригинала'),
@@ -1988,7 +2008,7 @@
         h('h3',null,B('Operatsii za proverka')),
         myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
           !isLocalJournalOp(o,doc&&doc.id)).map(o=>h('div',{className:'bv-card',key:o.op_id},
-          h(EntryStatus,{status:o.state}),
+          h(EntryStatus,{status:o.state,retryAt:o.next_retry}),
           h('p',{className:'bv-muted'},'Акция: '+queueTarget(o)+(o.target&&o.target.kind==='field'?' · '+(o.target.sheet||'')+' '+(o.target.col||'')+(o.target.row||''):'')),
           h('p',null,o.kind==='field'?(o.sheet+' '+o.col+o.row+' : '+o.value):o.kind==='audio'?B('Audio zapis ot ')+timeOf(o.event_at):o.error),
           o.state==='conflict'&&h('div',null,
@@ -2009,7 +2029,7 @@
             h('textarea',{className:'bv-textarea',defaultValue:o.transcript||'',placeholder:B('Vqvedi transkriptsiyata tuk...'),id:'audio-'+o.op_id}),
             h(Button,{onClick:()=>{const el=document.getElementById('audio-'+o.op_id);audioToText(o,el?el.value:'');}},B('Zapishi teksta')),
             CFG.stt_mode==='cloud'&&CFG.stt_cloud&&h(Button,{secondary:true,onClick:()=>retryAudio(o)},'Опитай облачно STT')),
-          o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending'}));syncAll();}},B('Opitay otnovo')),
+          o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending',attempts:0,next_retry:null,error:''}));await refreshQueue();syncAll();}},B('Opitay otnovo')),
           ['audio','review','voice_review','conflict','error','local_error'].includes(o.state)&&
             h('button',{type:'button',className:'bv-delete-op',onClick:()=>dropQueued(o),
               'aria-label':'Изтрий непратения запис от '+queueTarget(o)},icon('trash',15),' Изтрий записа')
@@ -2046,7 +2066,7 @@
           needsReview>0&&h('p',{className:'bv-queue-review-count'},needsReview+' записи изискват проверка'),
           displayedQueue.length===0&&h('p',null,'Няма чакащи операции.'),
           displayedQueue.map(o=>h('div',{className:'bv-queue-card',key:o.op_id},
-            h('div',{className:'bv-row spread'},h('strong',null,queueTarget(o)),h(EntryStatus,{status:o.state})),
+            h('div',{className:'bv-row spread'},h('strong',null,queueTarget(o)),h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
             h('small',null,(o.kind==='field'?o.sheet+' '+o.col+o.row:o.kind==='photo'?'Снимка':o.kind==='audio'?'Аудиозапис':o.kind==='audio_upload'?'Оригинално аудио':o.kind==='log_change'?'Промяна на събитие':o.kind==='log'?'Събитие':o.kind)+' · '+timeOf(o.event_at||o.created)),
             h('p',null,o.kind==='photo'?(o.filename||'Снимка'):o.kind==='audio'?(o.state==='review'||o.state==='voice_review'?(o.transcript||'Провери транскрипцията'):'Аудиофайл'):o.kind==='audio_upload'?'Качва оригиналния запис':(o.text||o.value||o.error||'')),
             o.stt_provider&&h('small',{className:'bv-muted'},'STT: '+o.stt_provider),
@@ -2064,7 +2084,7 @@
               o.error&&h('small',{className:'bv-voice-issue'},'Последна грешка: '+o.error),
               canDiscardInterruptedAudio(o)&&h('button',{className:'bv-delete-op',
                 onClick:()=>dropQueued(o)},'Изтрий прекъснатото аудио'),
-              o.state==='error'&&h('button',{className:'bv-retry-op',onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending'}));await refreshQueue();syncAll();}},'Опитай отново')))),
+              o.state==='error'&&h('button',{className:'bv-retry-op',onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending',attempts:0,next_retry:null,error:''}));await refreshQueue();syncAll();}},'Опитай отново')))),
           completedCount>0&&h('button',{className:'bv-retry-op',onClick:()=>setShowCompletedQueue(v=>!v)},
             showCompletedQueue?'Скрий приключените':'Покажи приключените ('+completedCount+')'),
           h(Button,{secondary:true,onClick:()=>setQueueOpen(false)},'Затвори'))),
