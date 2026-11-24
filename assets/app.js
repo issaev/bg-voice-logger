@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-ecb7252e43fe';
+  const BVLOG_RUNNING_BUILD = '0.8.0-5e642967a700';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -1820,13 +1820,27 @@
         });
       }catch(e){setAudioPlayerMessage('Натисни Play, за да прослушаш аудиото.');}
     },[audioPlayer && audioPlayer.url]);
-    async function playRemoteAudio(entry){
+    async function playRemoteAudio(entry,forceFull=false){
       if(!doc || !entry.audio || !entry.audio.id)return;
       const id=entry.audio.id,cacheKey=doc.id+':'+id;
       // Cancelling a download must not overwrite a newer player's state.
       closeAudioPlayer();
       const cached=audioBlobCacheRef.current.get(cacheKey);
       if(cached){showAudioBlob(cached,'Оригинално аудио');return;}
+      if(!forceFull&&navigator.onLine){
+        try{
+          const streamUrl=new URL(CFG.api+'audio-stream',location.href);
+          if(streamUrl.origin===location.origin){
+            streamUrl.searchParams.set('doc_id',doc.id);
+            streamUrl.searchParams.set('audio_id',id);
+            // Google mode uses its existing HttpOnly session cookie. WP REST
+            // requires the current nonce for native media requests.
+            if(CFG.nonce&&CFG.user&&CFG.user.id)streamUrl.searchParams.set('_wpnonce',CFG.nonce);
+            setAudioPlayer({url:streamUrl.href,label:'Оригинално аудио',streamEntry:entry});
+            setAudioPlayerMessage('');setAudioLoadingMessage('');return;
+          }
+        }catch(ignore){/* Use the compatible authenticated full download. */}
+      }
       const task=++audioSequenceRef.current;
       const controller=new AbortController();audioFetchRef.current=controller;
       setAudioBusy(id);setAudioPlayer({url:'',label:'Зареждане на оригиналното аудио'});
@@ -1948,8 +1962,9 @@
         (audioPlayer && audioPlayer.url)
           ?h('div',{className:'bv-audio-dock-actions'},
             h('audio',{ref:audioElementRef,src:audioPlayer.url,controls:true,preload:'metadata',
-              onError:()=>setAudioPlayerMessage('Този аудиоформат не може да се възпроизведе в браузъра.')}),
-            h('button',{type:'button',onClick:stopAudioPlayback,className:'bv-audio-stop'},icon('stop',17),' Стоп'))
+              onError:()=>setAudioPlayerMessage(audioPlayer.streamEntry?'Стриймингът не е достъпен. Опитай цялостно изтегляне.':'Този аудиоформат не може да се възпроизведе в браузъра.')}),
+            h('button',{type:'button',onClick:stopAudioPlayback,className:'bv-audio-stop'},icon('stop',17),' Стоп'),
+            audioPlayer.streamEntry&&h('button',{type:'button',onClick:()=>playRemoteAudio(audioPlayer.streamEntry,true)},'Цялостно изтегляне'))
           :h('div',{className:'bv-audio-loading'},h('span',null,audioLoadingMessage||'Зарежда се...'),
             h('button',{type:'button',onClick:closeAudioPlayer},'Откажи')),
         audioPlayerMessage&&h('small',{className:'bv-audio-message'},audioPlayerMessage)),

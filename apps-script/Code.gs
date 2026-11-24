@@ -1,5 +1,5 @@
 /**
- * BG Voice Logger - Google Apps Script bridge v0.8.0-a1 (draft).
+ * BG Voice Logger - Google Apps Script bridge v0.8.0 (draft).
  * Deploy as Web App: Execute as Me, access Anyone. HTTPS access is protected
  * by a long random shared secret kept only in WordPress and Script Properties.
  * Never put this secret into browser JavaScript or a public spreadsheet.
@@ -86,7 +86,7 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.0-a1'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.0'};
   }
   if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
@@ -159,7 +159,6 @@ function bvlList_(folderId, templateId, requestId) {
     const file = iter.next();
     if (file.getId() === templateId || file.isTrashed()) continue;
     files.push({id:file.getId(), name:file.getName(), created:file.getDateCreated().toISOString(), url:file.getUrl()});
-    if (files.length >= 250) break;
   }
   files.sort((a,b) => b.created.localeCompare(a.created));
   phase('list_files_loaded');
@@ -769,10 +768,16 @@ function bvlAudioPart_(rootId,ss,p){
   for(let i=0;i<count;i++){
     const partName=opId+'.part.'+String(i).padStart(3,'0'),parts=folder.getFilesByName(partName);
     if(!parts.hasNext())return {ok:true,complete:false,part_index:number};
-    const part=parts.next(),segment=part.getBlob().getBytes();all.push({file:part,bytes:segment});size+=segment.length;
-    if(size>8*1024*1024)return {ok:false,code:'audio_size',message:'Audio is over 8 MB.'};
+    // Check existence first. Do not reread already uploaded bytes on every part.
+    all.push({file:parts.next()});
   }
-  const content=[];all.forEach(p=>p.bytes.forEach(b=>content.push(b)));
+  const content=[];
+  for(const part of all){
+    const segment=part.file.getBlob().getBytes();
+    size+=segment.length;
+    if(size>8*1024*1024)return {ok:false,code:'audio_size',message:'Audio is over 8 MB.'};
+    segment.forEach(b=>content.push(b));
+  }
   const ext=({'audio/webm':'.webm','audio/ogg':'.ogg','audio/mp4':'.m4a','audio/mpeg':'.mp3','audio/wav':'.wav','audio/x-wav':'.wav'})[mime];
   const finalName=opId+ext,found=folder.getFilesByName(finalName);
   const saved=found.hasNext()?found.next():folder.createFile(Utilities.newBlob(content,mime,finalName));
@@ -792,13 +797,45 @@ function bvlAudioRead_(rootId,templateId,p){
   const dir=DriveApp.getFolderById(bvlValidId_(record[6]));
   if(f.isTrashed()||dir.isTrashed()||!bvlParentIs_(f,dir.getId())||!bvlParentIs_(dir,rootId))
     return {ok:false,code:'audio_missing',message:'Audio file was moved.'};
-  const bytes=f.getBlob().getBytes(),total=bytes.length;
-  if(total>8*1024*1024||offset>total)return {ok:false,code:'audio_size',message:'Audio exceeds supported read limit.'};
-  // 512 KiB per response: 16 requests for 8 MiB rather than 43.
-  // Base64 stays below WordPress' 1 MiB response limit.
-  const slice=bytes.slice(offset,Math.min(total,offset+524288));
+  const total=Number(f.getSize());
+  if(!Number.isInteger(total)||total<1||total>8*1024*1024||offset>total)
+    return {ok:false,code:'audio_size',message:'Audio exceeds supported read limit.'};
+  const mime=String(record[4]);
+  if(!['audio/webm','audio/ogg','audio/mp4','audio/mpeg','audio/wav','audio/x-wav'].includes(mime))
+    return {ok:false,code:'audio_format',message:'Unsupported audio format.'};
+  if(p.meta_only===true)return {ok:true,mime:mime,size:total,audio_id:audioId};
+  const requested=p.length==null?524288:Number(p.length);
+  if(!Number.isInteger(requested)||requested<1||requested>524288)
+    return {ok:false,code:'audio_size',message:'Invalid audio range length.'};
+  const end=Math.min(total,offset+requested);
+  const slice=end===offset?[]:bvlDriveAudioRange_(f,offset,end,total);
+  if(slice.length!==end-offset)return {ok:false,code:'audio_size',message:'Audio changed during read.'};
   return {ok:true,mime:String(record[4]),size:total,offset:offset,next:offset+slice.length,
     base64:Utilities.base64Encode(slice),audio_id:audioId};
+}
+
+/** Private Drive range. Never return an OAuth token, URL, or Drive ID to clients.
+ * A legacy full-blob fallback preserves playback if the Drive API is disabled.
+ * Strictly validate Content-Range and byte count before returning a partial response.
+ */
+function bvlDriveAudioRange_(file,start,end,total){
+  try {
+    const response=UrlFetchApp.fetch('https://www.googleapis.com/drive/v3/files/'+encodeURIComponent(file.getId())+'?alt=media&supportsAllDrives=true',{
+      headers:{Authorization:'Bearer '+ScriptApp.getOAuthToken(),Range:'bytes='+start+'-'+(end-1),'Accept-Encoding':'identity'},
+      muteHttpExceptions:true,followRedirects:false
+    });
+    const status=response.getResponseCode();
+    const bytes=response.getContent();
+    if(status===206){
+      const headers=response.getAllHeaders();
+      const key=Object.keys(headers).find(k=>k.toLowerCase()==='content-range');
+      if(key&&String(headers[key])==='bytes '+start+'-'+(end-1)+'/'+total&&bytes.length===end-start)return bytes;
+    }
+    if(status===200&&bytes.length===total)return bytes.slice(start,end);
+  }catch(ignore){/* Compatibility fallback, without exposing provider credentials. */}
+  const bytes=file.getBlob().getBytes();
+  if(bytes.length!==total)return [];
+  return bytes.slice(start,end);
 }
 
 /** Keep private thumbnails attached to their LOG ID after row sorting/movement. */

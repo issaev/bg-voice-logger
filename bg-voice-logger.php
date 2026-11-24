@@ -3,7 +3,7 @@
  * Plugin Name: BG Voice Logger
  * Plugin URI: https://example.invalid/bg-voice-logger
  * Description: Field-first voice operations journal for Google Sheets with offline queue and Apps Script bridge.
- * Version: 0.7.2.1
+ * Version: 0.8.0
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: BG Voice Logger Project
@@ -13,7 +13,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('BVLOG_VERSION', '0.7.2.1');
+define('BVLOG_VERSION', '0.8.0');
 define('BVLOG_DIR', plugin_dir_path(__FILE__));
 define('BVLOG_URL', plugin_dir_url(__FILE__));
 
@@ -178,6 +178,7 @@ add_shortcode('bg_voice_logger', function () {
 });
 
 add_action('rest_api_init', array('BVLOG_API', 'register_routes'));
+add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 10, 4);
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('admin_menu', array('BVLOG_Admin', 'register_menu'));
 add_action('admin_post_bvlog_save', array('BVLOG_Admin', 'save'));

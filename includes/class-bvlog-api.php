@@ -49,6 +49,9 @@ class BVLOG_API {
         register_rest_route('bvlog/v1', '/audio-view', array_merge($opts, array(
             'methods' => 'GET', 'callback' => array(__CLASS__, 'audio_view')
         )));
+        register_rest_route('bvlog/v1', '/audio-stream', array_merge($opts, array(
+            'methods' => 'GET, HEAD', 'callback' => array(__CLASS__, 'audio_stream')
+        )));
         register_rest_route('bvlog/v1', '/photo', array_merge($opts, array(
             'methods' => 'POST', 'callback' => array(__CLASS__, 'photo')
         )));
@@ -157,7 +160,7 @@ class BVLOG_API {
             'payload' => $payload,
         );
         $image_read = ($diag_action === 'photo_read');
-        $max_response = $image_read ? 5 * 1024 * 1024 : 1024 * 1024;
+        $max_response = ($image_read || $diag_action === 'list') ? 5 * 1024 * 1024 : 1024 * 1024;
         // Explicit budgets protect normal journal writes from long hangs while
         // giving slower Google Drive media calls time to complete.
         $request_timeout = 15;
@@ -269,6 +272,94 @@ class BVLOG_API {
         if (!preg_match('/^[A-Za-z0-9_-]{15,200}$/',$doc) || !preg_match('/^[a-f0-9-]{32,50}$/i',$id))
             return new WP_Error('bvlog_audio_ref','Invalid audio reference.',array('status'=>400));
         return self::forward('audio_read',array('doc_id'=>$doc,'audio_id'=>$id,'offset'=>$offset));
+    }
+    /**
+     * Authenticated same-origin native audio playback. A single bounded Range
+     * can be served without downloading the entire file to the browser.
+     * Every request goes through the existing authorization + folder checks.
+     */
+    public static function audio_stream($request) {
+        $doc = sanitize_text_field((string)$request->get_param('doc_id'));
+        $id = sanitize_text_field((string)$request->get_param('audio_id'));
+        if (!preg_match('/^[A-Za-z0-9_-]{15,200}$/D',$doc) || !preg_match('/^[a-f0-9-]{32,50}$/iD',$id))
+            return new WP_Error('bvlog_audio_ref','Invalid audio reference.',array('status'=>400));
+        $range = trim((string)$request->get_header('Range'));
+        $head = strtoupper($request->get_method()) === 'HEAD';
+        $limit = 524288; $max = 8 * 1024 * 1024;
+        $start = 0; $end = $limit - 1; $suffix = 0;
+        $base = array('doc_id'=>$doc,'audio_id'=>$id);
+        $headers = array('Cache-Control'=>'private, no-store, no-cache, must-revalidate, max-age=0',
+            'Pragma'=>'no-cache','Accept-Ranges'=>'bytes','X-Content-Type-Options'=>'nosniff',
+            'Cross-Origin-Resource-Policy'=>'same-origin','Referrer-Policy'=>'no-referrer');
+        if ($range !== '') {
+            if (!preg_match('/^bytes=([0-9]{0,9})-([0-9]{0,9})$/D',$range,$m) ||
+                ($m[1]==='' && $m[2]===''))
+                return new WP_Error('bvlog_audio_range','Invalid or multiple audio ranges.',array('status'=>416));
+            if ($m[1]==='') { $suffix=(int)$m[2]; if($suffix<1)return new WP_Error('bvlog_audio_range','Invalid suffix.',array('status'=>416)); }
+            else {
+                $start=(int)$m[1];
+                $end=$m[2]===''?$start+$limit-1:min((int)$m[2],$start+$limit-1);
+                if ($start>=$max || $end<$start)
+                    return new WP_Error('bvlog_audio_range','Range not satisfiable.',array('status'=>416));
+            }
+        }
+        $mime_types = array('audio/webm','audio/ogg','audio/mp4','audio/mpeg','audio/wav','audio/x-wav');
+        // Suffix/HEAD require authoritative total size; also works with old GAS
+        // which ignores meta_only and returns the first chunk.
+        if ($head || $suffix) {
+            $meta=self::forward('audio_read',array_merge($base,array('offset'=>0,'meta_only'=>true)));
+            if(is_wp_error($meta))return $meta;
+            $m=$meta->get_data();$size=(int)($m['size']??0);$mime=(string)($m['mime']??'');
+            if(empty($m['ok'])||$size<1||$size>$max||!in_array($mime,$mime_types,true))
+                return new WP_Error('bvlog_audio_missing','Audio unavailable.',array('status'=>404));
+            if($head)return new WP_REST_Response('',200,array_merge($headers,array('Content-Type'=>$mime,'Content-Length'=>(string)$size)));
+            $start=max(0,$size-$suffix);$end=min($size-1,$start+$limit-1);
+        }
+        $result=self::forward('audio_read',array_merge($base,array('offset'=>$start,'length'=>$end-$start+1)));
+        if(is_wp_error($result))return $result;
+        $data=$result->get_data();
+        if(empty($data['ok'])) {
+            // Obtain size only for an unsatisfiable range, not on each request.
+            if(($data['code']??'')==='audio_size' && $range!==''){
+                $meta=self::forward('audio_read',array_merge($base,array('offset'=>0,'meta_only'=>true)));
+                if(!is_wp_error($meta)){
+                    $m=$meta->get_data();$size=(int)($m['size']??0);
+                    if(!empty($m['ok'])&&$size>0&&$size<=$max&&$start>=$size)
+                        return new WP_REST_Response(null,416,array_merge($headers,array('Content-Range'=>'bytes */'.$size)));
+                }
+            }
+            return new WP_Error('bvlog_audio_missing','Audio unavailable.',array('status'=>404));
+        }
+        $size=(int)($data['size']??0);$next=(int)($data['next']??0);$mime=(string)($data['mime']??'');
+        $bytes=base64_decode((string)($data['base64']??''),true);
+        if($size<1||$size>$max||!in_array($mime,$mime_types,true)||!isset($data['offset'])||
+            (int)$data['offset']!==$start||$next<$start||$next>$size||$bytes===false||
+            strlen($bytes)!==$next-$start||strlen($bytes)>$limit)
+            return new WP_Error('bvlog_audio_invalid','Invalid audio response.',array('status'=>424));
+        if($start>=$size)
+            return new WP_REST_Response(null,416,array_merge($headers,array('Content-Range'=>'bytes */'.$size)));
+        $expected=min($end,$size-1)-$start+1;
+        // A legacy GAS response may contain more bytes than requested (e.g. iOS 0-1).
+        if(strlen($bytes)<$expected)return new WP_Error('bvlog_audio_invalid','Incomplete audio response.',array('status'=>424));
+        $bytes=substr($bytes,0,$expected);
+        $headers['Content-Type']=$mime;$headers['Content-Length']=(string)strlen($bytes);
+        if($range!==''){
+            $headers['Content-Range']='bytes '.$start.'-'.($start+strlen($bytes)-1).'/'.$size;
+            return new WP_REST_Response($bytes,206,$headers);
+        }
+        // No-Range clients can play small files directly; larger files use the
+        // existing full-download fallback rather than a misleading truncated 200.
+        if(strlen($bytes)!==$size)
+            return new WP_Error('bvlog_audio_range_required','Use Range or full audio download.',array('status'=>400));
+        return new WP_REST_Response($bytes,200,$headers);
+    }
+    public static function serve_audio_stream($served,$result,$request,$server) {
+        if($served || $request->get_route()!=='/bvlog/v1/audio-stream' ||
+            !in_array($result->get_status(),array(200,206),true))return $served;
+        $bytes=$result->get_data();
+        if(!is_string($bytes))return $served;
+        if(strtoupper($request->get_method())!=='HEAD')echo $bytes;
+        return true;
     }
     public static function audio($request) {
         $p=(array)$request->get_json_params();
