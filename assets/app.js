@@ -686,9 +686,63 @@
       }catch(e){if(request===docsRequestRef.current && scope===DB)setDocsError(e.message);}
       finally{if(request===docsRequestRef.current && scope===DB)setDocsLoading(false);}
     }
-    async function loadDocument(id) {
+    // These timers only retry transport failures. Never create a second write
+    // because a post-write document refresh failed.
+    function clearReadRetry() {
+      if(readRetryRef.current.timer!=null)window.clearTimeout(readRetryRef.current.timer);
+      readRetryRef.current={id:'',attempts:0,nextAt:0,timer:null,exhausted:false};
+    }
+    function runScheduledReadRetry() {
+      const job=readRetryRef.current;
+      job.timer=null;
+      if(!job.id||job.exhausted)return;
+      if(job.id!==docRef.current?.id){clearReadRetry();return;}
+      if(!navigator.onLine||document.hidden)return; // resume on online/visibility.
+      if(Date.now()<job.nextAt){scheduleReadRetryTimer();return;}
+      const active=refreshRef.current;
+      if(!active||active.id!==job.id||!active.ready||syncingRef.current||documentReadInFlightRef.current){
+        job.nextAt=Date.now()+15000;
+        scheduleReadRetryTimer();return;
+      }
+      active.load(job.id,true);
+    }
+    function scheduleReadRetryTimer() {
+      const job=readRetryRef.current;
+      if(!job.id||job.exhausted)return;
+      if(job.timer!=null)window.clearTimeout(job.timer);
+      job.timer=window.setTimeout(runScheduledReadRetry,Math.max(200,job.nextAt-Date.now()));
+    }
+    function scheduleReadRetry(id,error,automatic) {
+      if(!isTransientRequestError(error)||id!==docRef.current?.id)return false;
+      const previous=readRetryRef.current;
+      const attempts=(automatic&&previous.id===id?previous.attempts:0)+1;
+      if(previous.timer!=null)window.clearTimeout(previous.timer);
+      if(attempts>READ_RETRY_DELAYS_MS.length){
+        readRetryRef.current={id,attempts:READ_RETRY_DELAYS_MS.length,nextAt:0,timer:null,exhausted:true};
+        return false;
+      }
+      readRetryRef.current={id,attempts,nextAt:Date.now()+READ_RETRY_DELAYS_MS[attempts-1],timer:null,exhausted:false};
+      scheduleReadRetryTimer();return true;
+    }
+    function scheduleWriteRetry(items) {
+      if(writeRetryTimerRef.current!=null)window.clearTimeout(writeRetryTimerRef.current);
+      writeRetryTimerRef.current=null;
+      const dates=items.filter(o=>{
+        if(o.state!=='pending'||!o.next_retry)return false;
+        const parentId=o.kind==='audio_upload'?o.target_id:o.kind==='photo'?o.log_op_id:null;
+        const parent=parentId&&items.find(x=>x.op_id===parentId);
+        return !parent||parent.state==='synced'; // never spin waiting on a blocked parent.
+      }).map(o=>Date.parse(o.next_retry)).filter(Number.isFinite);
+      if(!dates.length)return;
+      writeRetryTimerRef.current=window.setTimeout(()=>{
+        writeRetryTimerRef.current=null;
+        if(navigator.onLine&&!document.hidden)syncAll();
+      },Math.max(250,Math.min(...dates)-Date.now()));
+    }
+    async function loadDocument(id,automaticRetry=false) {
       // A manual refresh and the 120s poll must not launch the same read twice.
       if(documentReadInFlightRef.current?.id===id)return false;
+      if(!automaticRetry)clearReadRetry();
       const request=++documentRequestRef.current;
       documentReadInFlightRef.current={id,request};
       setDocLoading(true);setDocLoadError('');
@@ -706,14 +760,17 @@
         setData(r.data);
         setLastFreshAt(new Date().toISOString());
         readBackoffRef.current={id,attempts:0,nextAt:0};
+        clearReadRetry();
         try{await database('put','snapshots',{id,data:r.data,updated:new Date().toISOString()});}
         catch(localError){setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
         if(request!==documentRequestRef.current)return;
         try{const snap=await database('get','snapshots',id);if(snap)setData(snap.data);}
         catch(ignore){}
-        setDocLoadError('Google Sheets: '+(e.message||'Неуспешно обновяване.')+
-          (lastFreshAt?' Показани са последните потвърдени данни от '+timeOf(lastFreshAt)+'.':''));
+        const scheduled=scheduleReadRetry(id,e,automaticRetry);
+        setDocLoadError('Документът не е обновен: '+(e.message||'Неуспешно обновяване.')+
+          (lastFreshAt?' Показани са последните потвърдени данни от '+timeOf(lastFreshAt)+'.':'')+
+          (scheduled?' Автоматичен повторен опит е планиран.':''));
         const previous=readBackoffRef.current;
         const attempts=(previous.id===id?previous.attempts:0)+1;
         readBackoffRef.current={id,attempts,
@@ -725,6 +782,7 @@
     }
     async function startSession(chosen) {
       if (!chosen || !checkOperatorName()) return;
+      clearReadRetry();
       setDoc(chosen); docRef.current=chosen;
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
       setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
@@ -1008,7 +1066,7 @@
       return()=>window.clearInterval(timer);
     },[mode,doc&&doc.id,online]);
 
-    function closeSession() { if(recording)return;documentRequestRef.current++;setDocLoading(false);setDocLoadError('');setLastFreshAt('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    function closeSession() { if(recording)return;clearReadRetry();documentRequestRef.current++;setDocLoading(false);setDocLoadError('');setLastFreshAt('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
