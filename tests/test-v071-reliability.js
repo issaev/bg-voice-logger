@@ -41,7 +41,7 @@ async function run(){
  vm.runInContext(enqueueText+'\nthis.enqueue=enqueue;',context);
  let result=await context.enqueue({kind:'log',doc_id:'D',op_id:'stable-uuid'});
  assert.equal(result,true);assert.equal(commits,1);assert.equal(saves.length,0);
- assert.ok(uiNotices.some(s=>s.includes('UI')||s.includes('')), 'should signal saved state despite UI failure');
+ assert.ok(uiNotices.some(s=>s.includes('\u0437\u0430\u043f\u0430\u0437\u0435\u043d')), 'should report saved state despite UI refresh failure');
  context.database=async()=>{throw Error('quota')};
  result=await context.enqueue({kind:'log',doc_id:'D'});
  assert.equal(result,false);assert.equal(commits,1);
@@ -112,7 +112,7 @@ async function run(){
  tree=render();
  const footer=tree.find(n=>n.props.className==='bv-footer-status');
  assert.ok(footer);assert.equal(footer.props.role,'alert');
- assert.equal(hasText(footer,'Vsichko e sinhronizirano'),false,'synced falsely shown while audio unsaved');
+ assert.ok(hasText(footer,'\u041d\u0415 \u0435 \u0437\u0430\u043f\u0430\u0437\u0435\u043d\u043e'),'missing explicit unsaved warning');
  const fields=tree.filter(n=>n.type==='button'&&n.props.className==='bv-info-val');
  assert.equal(fields.length,3);
  fields[1].props.onClick();
