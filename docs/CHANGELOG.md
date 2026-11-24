@@ -1,3 +1,13 @@
+## v0.7.2.1 — Reliability & continuous voice LOG hotfix (DRAFT; not deployed)
+- #18: render each dictated LOG event continuously through audio/STT/review/pending/sending/synced/server echo with one stable op_id and no duplicate/flicker.
+- #17: distinct incident-list, document-read, sync and local persistence errors; a successful read cannot mask unrelated unsaved audio. Keep last confirmed data on read failure.
+- #15: read POST timeout 35s (previously 15s), redirect GET 15s, other operation budgets unchanged. Bound 120s polling with backoff and prevent overlapping reads for an incident.
+- WordPress: a 30-entry sanitized history for read/list/create/operation terminal results; safe request correlation to Apps Script.
+- GAS: privacy-safe action and read-phase timings. Still does **not** solve 115s execution outliers; investigate with trace data for #16.
+- WordPress/Google Apps Script must be upgraded in coordination; no Cloudflare STT, IndexedDB or Sheets schema migration.
+- Isolated test suite 22/32 PASS vs 20/30 on the previous voice continuity candidate; same ten inherited failures; real iPhone and Sheets acceptance pending.
+- [Hotfix upgrade and rollback guide](UPGRADE_V0721_BG.md).
+
 ## v0.7.2 — Performance & Usability (draft candidate; NOT deployed)
 - #6: coalesce successful current-action LOG/INFO/media sync into one final Google document read per batch, preserving acknowledgments and idempotency.
 - #9: sticky top-bar queue button with count and attention indicator, public-mode access and pending-first modal; completed items available on demand.
