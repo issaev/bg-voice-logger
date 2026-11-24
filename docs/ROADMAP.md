@@ -76,6 +76,18 @@ Acceptance remains open for real iPhone Safari recording/review and refresh beha
 
 **Performance outcome:** count eliminated document requests and report comparable p50/error-rate changes. Do not promise a fixed percentage before measuring.
 
+### v0.8.0 — selected action and best-effort background queue (Draft, not deployed)
+
+Follow-on branch `feature/v0.8.0-stable-selection-background-sync` stacked on retry PR #29, tracks [#11](https://github.com/issaev/bg-voice-logger/issues/11) and [#27](https://github.com/issaev/bg-voice-logger/issues/27).
+
+- **Selection safety:** pinned manual `selectedDocRef` survives stale and overlapping `loadDocs` responses. If the selected Google Sheet disappears, show a visible error and require new explicit selection; do not silently open the newest. Assert exact ID at Open time.
+- **Background Sync:** existing PWA Service Worker processes bounded, individually authenticated, idempotent `log`, `field`, `add_row`, `log_change`, private photo and chunked `audio_upload` operations in the current operator's IndexedDB queue, when browser Background Sync allows. Fetch a fresh session/CSRF/nonce; never persist tokens, media URLs or user IDs in CacheStorage.
+- **Safety/rollback:** per-user atomic lock in a **separate** IndexedDB `bg-voice-logger-sync-leases-v1`, shared with foreground `syncAll`; the existing operational queue schema stays **DB_SCHEMA=2**, compatible with v0.7.2.1 rollback. Reuse `op_id`, `doc_id`, and acknowledged media chunk checkpoints. Skip voice STT in service worker. Notify open clients with a non-sensitive refresh-only message.
+- **Platform reality:** PWA service workers do not guarantee ongoing transfer while screen is locked; iOS Safari lacks the same one-shot Background Sync and uses auto resume on foreground/online. For guaranteed locked-screen transfer a native OS foreground/background service requires separate design.
+- **Verification:** isolated `test-v080-stable-selection.js` and `test-v080-background-sw.js` pass; local test-file suite **27/37 PASS** vs PR #29 baseline **25/35**, with same ten historical failures and no new failing files. No physical Android/iOS or real Google Sheets staging acceptance yet. See [test plan](PLAN_V080_SELECTION_BACKGROUND_BG.md).
+
+Do not deploy or merge automatically; this is a dependent Draft PR on PR #29. PR #21 (GAS profiling) and PR #30 (mobile UI) remain independent.
+
 ### v0.8.0 reliability increment — retry/recovery (Draft, NOT deployed)
 
 A separate frontend retry candidate in `feature/v0.8.0-retry-recovery` addresses [#22](https://github.com/issaev/bg-voice-logger/issues/22) and [#25](https://github.com/issaev/bg-voice-logger/issues/25): three automatic 5/15/30-second retry attempts for transient document reads, bounded and jittered retry for IndexedDB-queued writes with the original `op_id`, capped attempts, visible pending retry state, and safe resume on foreground/online. No new Google Apps Script, PHP or IndexedDB schema. **Actual locked-screen continuous transfer is not guaranteed and remains #27.** This is separate from [Draft PR #21](https://github.com/issaev/bg-voice-logger/pull/21) (GAS profiling).
