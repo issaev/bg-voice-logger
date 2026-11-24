@@ -35,8 +35,8 @@ function runV081(app,gas,css){
   f=fixture();f.fault('beforeCopy');try{f.make();}catch(e){};f.fault('');r=f.make();check(!r.ok&&r.code==='create_unknown'&&f.count()===0,'ambiguous absent copy fails closed');tests.push('uncertain copy fails closed');
   f=fixture();r=f.make();f.files[0].dead=true;r=f.make();check(!r.ok&&r.code==='create_missing'&&f.count()===1,'moved/deleted previous result must not recreate');tests.push('missing confirmed document fails closed');
   const create=extract(app,'    async function newDocument() {','    async function enqueue(op)');
-  check(!create.includes('await loadDocs(')&&create.includes('docsRequestRef.current++')&&create.includes('await startSession(r.document)'),'no blocking LIST, invalidate stale list');
-  check(create.indexOf('localStorage.setItem(key,JSON.stringify(payload))')<create.indexOf("api('documents','POST',payload)"),'persist before send');
+  check(!create.includes('await loadDocs(')&&create.includes('docsRequestRef.current++')&&create.includes('await startSession(r.document,r.bootstrap)'),'no blocking LIST, invalidate stale list');
+  check(create.indexOf('localStorage.setItem(key,JSON.stringify(payload))')<create.indexOf("api('documents','POST',Object.assign({},payload,{bootstrap:true}))"),'persist before send');
   tests.push('create critical path and durable request markers');
   const picker=extract(app,'  function PhotoSourcePicker(','  // A Google popup');
   const h=(type,props,...children)=>({type,props:props||{},children}),refs=[];let open=false,ri=0,chosen=0,received=0;

@@ -490,9 +490,10 @@ function bvlPrepare_(ss, needed) {
     const start=name==='LOG'?7:name==='TEAM'?9:6;
     const range=sh.getRange(header,start,1,technical.length);
     const existing=range.getDisplayValues()[0];
+    const formulas=typeof range.getFormulas==='function'?range.getFormulas()[0]:[];
     for(let i=0;i<technical.length;i++){
       const pair=technical[i],current=existing[i];
-      if(current&&current!==pair[1])throw new Error(name+' '+pair[0]+header+
+      if((current&&current!==pair[1])||(!current&&formulas[i]))throw new Error(name+' '+pair[0]+header+
         ' is already in use. Refusing to overwrite manually added data.');
     }
     // Fill only empty cells, retaining existing cell formatting and formulas.
@@ -677,6 +678,45 @@ function bvlAddRow_(ss, p) {
   sheet.getRange(next,1,1,count+2).setValues([[next-2].concat(entries,[String(p.op_id)])]);
   return {ok:true,row:next};
 }
+// For a sparse active tab, find exact index keys first and fetch only a few
+// contiguous blocks. Fall back to the old full range for dense or unsupported
+// searches. Never use a cached media mapping or discard a matching history row.
+function bvlIndexedRows_(sheet,width,keyColumn,keys){
+  if(!sheet)return [];
+  const last=sheet.getLastRow();
+  if(last<2)return [];
+  const all=()=>sheet.getRange(2,1,last-1,width).getDisplayValues();
+  if(!keys)return all();
+  const values=Array.from(keys);
+  if(!values.length)return [];
+  if(last<=257||values.length>120)return all();
+  // Exact identifiers only; irregular manually entered IDs use the full scan.
+  if(values.some(x=>!/^[A-Za-z0-9_-]{1,200}$/.test(x)))return all();
+  const pattern='^('+values.join('|')+')$';
+  if(pattern.length>12000)return all();
+  try{
+    const matches=sheet.getRange(2,keyColumn,last-1,1).createTextFinder(pattern)
+      .useRegularExpression(true).matchEntireCell(true).matchCase(true).findAll();
+    const rows=Array.from(new Set(matches.map(x=>x.getRow()))).sort((a,b)=>a-b);
+    if(!rows.length)return [];
+    const runs=[];
+    for(const row of rows){
+      if(row<2||row>last)return all();
+      const prev=runs[runs.length-1];
+      if(prev&&row<=prev.end+2)prev.end=row;
+      else runs.push({start:row,end:row});
+      if(runs.length>8)return all();
+    }
+    const size=runs.reduce((n,x)=>n+x.end-x.start+1,0);
+    if(size>(last-1)*0.5)return all();
+    const wanted=new Set(values),out=[];
+    for(const run of runs){
+      const part=sheet.getRange(run.start,1,run.end-run.start+1,width).getDisplayValues();
+      for(const record of part)if(wanted.has(String(record[keyColumn-1]||'')))out.push(record);
+    }
+    return out;
+  }catch(ignore){return all();}
+}
 function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   const tabs=['LOG','INFO','TEAM','TECH'];
   const tab=tabs.includes(requestedTab)?requestedTab:'';
@@ -715,8 +755,8 @@ function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   const byLogId = {};
   const visibleIds=new Set(lr.map(v=>String(v[6]||'')).filter(Boolean));
   const gallery = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.PHOTOS):null;
-  if (gallery && gallery.getLastRow() >= 2) {
-    const stored = gallery.getRange(2,1,gallery.getLastRow()-1,10).getDisplayValues();
+  if (gallery) {
+    const stored = bvlIndexedRows_(gallery,10,2,tab?visibleIds:null);
     stored.forEach(record => {
       const logId = String(record[1] || '');
       const mediaId = String(record[0] || '');
@@ -728,8 +768,8 @@ function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   phase('photos_loaded');
   const byAudio = {}, byFieldAudio = {};
   const audioIndex = (!tab||tab!=='LOG'||visibleIds.size)?ss.getSheetByName(BVL.AUDIOS):null;
-  if (audioIndex && audioIndex.getLastRow() >= 2) {
-    audioIndex.getRange(2,1,audioIndex.getLastRow()-1,12).getDisplayValues().forEach(r => {
+  if (audioIndex) {
+    bvlIndexedRows_(audioIndex,12,tab&&tab!=='LOG'?10:2,tab?(tab==='LOG'?visibleIds:new Set([tab])):null).forEach(r => {
       if(want('LOG')&&r[2] === 'log' && r[1] && r[0]&&(!tab||visibleIds.has(String(r[1]))))byAudio[String(r[1])] = {id:String(r[0]),mime:String(r[4]||''),bytes:Number(r[8]||0)};
       if(r[2] === 'field' && r[9] && r[10] && r[11]&&(!tab||String(r[9])===tab)){
         const fieldKey=String(r[9])+':'+String(r[11])+String(r[10]);
@@ -742,8 +782,8 @@ function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   phase('audio_index_loaded');
   const byHistory = {};
   const audit = want('LOG')&&(!tab||visibleIds.size)?ss.getSheetByName(BVL.HISTORY):null;
-  if (audit && audit.getLastRow() >= 2) {
-    audit.getRange(2,1,audit.getLastRow()-1,8).getDisplayValues().forEach(r => {
+  if (audit) {
+    bvlIndexedRows_(audit,8,2,tab?visibleIds:null).forEach(r => {
       const key = String(r[1]||'');
       if (!key || (tab&&!visibleIds.has(key))) return;
       if (!byHistory[key]) byHistory[key] = [];
@@ -776,7 +816,8 @@ function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   }
 
   phase('team_tech_loaded');
-  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data,loaded_tabs:tab?[tab]:tabs};
+  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data};
+  if(tab)result.loaded_tabs=[tab];
   phase('read_complete');
   return result;
 }

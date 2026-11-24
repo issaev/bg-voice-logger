@@ -28,17 +28,17 @@ function esc_url_raw($s){return $s;}
 require dirname(__DIR__).'/bg-voice-logger.php';
 function check($cond,$why){if(!$cond)throw new Exception($why);}
 $jsfile=dirname(__DIR__).'/assets/app.js';$cssfile=dirname(__DIR__).'/assets/app.css';
-check(BVLOG_VERSION==='0.8.1','Version mismatch');
-check(bvlog_asset_version('assets/app.js')==='0.8.1-'.substr(hash_file('sha256',$jsfile),0,12),'JS hash mismatch');
-check(bvlog_asset_version('assets/app.css')==='0.8.1-'.substr(hash_file('sha256',$cssfile),0,12),'CSS hash mismatch');
+check(BVLOG_VERSION==='0.8.2','Version mismatch');
+check(bvlog_asset_version('assets/app.js')==='0.8.2-'.substr(hash_file('sha256',$jsfile),0,12),'JS hash mismatch');
+check(bvlog_asset_version('assets/app.css')==='0.8.2-'.substr(hash_file('sha256',$cssfile),0,12),'CSS hash mismatch');
 check(bvlog_asset_version('assets/does-not-exist')===BVLOG_VERSION,'Missing file should fallback');
 check(bvlog_asset_version('../wp-config.php')===BVLOG_VERSION,'Invalid path should fallback');
 $source=file_get_contents($jsfile);
 $canonical=preg_replace("~const BVLOG_RUNNING_BUILD = '[A-Za-z0-9._-]+';~","const BVLOG_RUNNING_BUILD = '__BUILD_PLACEHOLDER__';",$source,1);
-check(bvlog_expected_js_build()==='0.8.1-'.substr(hash('sha256',$canonical),0,12),'Runtime marker differs from canonical JS');
+check(bvlog_expected_js_build()==='0.8.2-'.substr(hash('sha256',$canonical),0,12),'Runtime marker differs from canonical JS');
 preg_match("~const BVLOG_RUNNING_BUILD = '([^']+)';~",$source,$matches);
 check($matches[1]===bvlog_expected_js_build(),'Embedded JS ID mismatch');
-check(strpos(bvlog_service_worker_build(),'0.8.1-')===0,'Service-worker cache must track release');
+check(strpos(bvlog_service_worker_build(),'0.8.2-')===0,'Service-worker cache must track release');
 foreach($actions['wp_enqueue_scripts'] as $fn)$fn();
 $shortcodes['bg_voice_logger']();
 $css=array_values(array_filter($enqueued,fn($x)=>$x['kind']==='css'));
@@ -49,5 +49,5 @@ check($js[0]['version']===bvlog_asset_version('assets/app.js'),'JS enqueue must 
 check($js[0]['deps']===['wp-element'],'React dependency order changed');
 check(strpos($inline[0]['code'],bvlog_expected_js_build())!==false,'HTML config missing expected build');
 check(strpos($inline[0]['code'],'bvlog_sw=1')!==false,'Missing SW registration URL');
-check(strpos($inline[0]['code'],'build=0.8.1-')!==false,'Missing SW content-version URL');
-echo "PASS v0.8.1 PHP: hashed assets, fallback, same enqueues, SW version and running build.\n";
+check(strpos($inline[0]['code'],'build=0.8.2-')!==false,'Missing SW content-version URL');
+echo "PASS v0.8.2 PHP: hashed assets, fallback, same enqueues, SW version and running build.\n";
