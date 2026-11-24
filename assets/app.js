@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.2.2-3b14139a1bdd';
+  const BVLOG_RUNNING_BUILD = '0.8.2.2-3e65539c2fb5';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -984,7 +984,7 @@
         Date.now()-Date.parse(entry.stamp||'')>=tabRefreshMs);
       setLastFreshAt(entry.live?entry.stamp:'');
       setDocLoadError(entry.error||'');
-      viewRef.current={id,tab,hasData:true,stamp:entry.stamp};return true;
+      viewRef.current={id,tab,hasData:true,stamp:entry.stamp,data:entry.data};return true;
     }
     function invalidateTabs(id,tabs){
       if(id!==docRef.current?.id)return;
@@ -1105,16 +1105,20 @@
       // Finish warming all tabs before revisiting a warmed one.
       for(const tab of prefetchOrder)
         if(eligible(tab)&&!currentTabEntry(id,tab)?.live)return tab;
-      // Priority order for subsequent refresh cycles, independent of the open tab.
-      for(const tab of prefetchOrder){
+      // Dirty data first, then oldest successful refresh. The navigation order
+      // breaks ties, and slow requests cannot starve the last tab.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&currentTabEntry(id,tab)?.dirty)return tab;
+      const due=prefetchOrder.filter(tab=>{
         const entry=currentTabEntry(id,tab);
-        if(eligible(tab)&&entry&&(entry.dirty||now-Date.parse(entry.stamp||'')>=tabRefreshMs))return tab;
-      }
-      return '';
+        return eligible(tab)&&entry&&now-Date.parse(entry.stamp||'')>=tabRefreshMs;
+      });
+      due.sort((a,b)=>Date.parse(currentTabEntry(id,a).stamp)-Date.parse(currentTabEntry(id,b).stamp));
+      return due[0]||'';
     }
     function applyDeferredTab(id){
       const tab=pageRef.current,entry=currentTabEntry(id,tab);
-      if(entry?.data&&entry.live&&!entry.dirty&&viewRef.current.stamp!==entry.stamp&&
+      if(entry?.data&&entry.live&&!entry.dirty&&viewRef.current.data!==entry.data&&
         refreshRef.current?.safeToPaint!==false)paintTab(id,tab,entry);
     }
     async function startSession(chosen,bootstrap) {
@@ -1147,7 +1151,12 @@
       setDocLoading(false);
       // A warm tab renders without a new request. An uncached user choice
       // supersedes speculative work; an identical in-flight read is adopted.
-      if(!fresh)loadDocument(id,false,tab);
+      if(!fresh){
+        // Cached content is usable immediately. Do not abort a different tab's
+        // speculative read merely to revalidate content we already have.
+        if(!shown||!documentReadInFlightRef.current||documentReadInFlightRef.current.tab===tab)
+          loadDocument(id,false,tab);
+      }
     }
     async function newDocument() {
       if(createFlightRef.current||!checkOperatorName())return;
@@ -1506,14 +1515,12 @@
       safeToPaint:!recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving,
       prefetch:nextPrefetchTab,applyDeferred:applyDeferredTab,
       backgroundReady:mode==='session'&&online&&!recording&&!fieldRecording&&!microphoneTest&&
-        !editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
-        !queue.some(o=>doc&&o.doc_id===doc.id&&['pending','sending','transcribing'].includes(o.state)&&
-          (!o.next_retry||Date.parse(o.next_retry)<=Date.now())),
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
       ready:mode==='session'&&online&&!docLoading&&
-      !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
-      !unsavedAudio&&!draft.trim()&&!photos.length&&!queueOpen&&!gallery&&!logSaving&&
-      !rowSaving&&!photoBusy&&
-      !queue.some(o=>doc&&o.doc_id===doc.id&&!['synced','cancelled'].includes(o.state)),
+        !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
       load:loadDocument};
     useEffect(()=>{
       if(mode!=='session'||!doc||!online)return;
@@ -1526,6 +1533,9 @@
         if(document.hidden||!navigator.onLine||syncingRef.current||
           !fresh||fresh.id!==id||!fresh.backgroundReady||docRef.current?.id!==id||documentReadInFlightRef.current)return;
         fresh.applyDeferred(id);
+        // Do not start a speculative read just before a due foreground retry.
+        const retry=readRetryRef.current;
+        if(retry.id===id&&!retry.exhausted&&retry.nextAt<=Date.now()&&fresh.ready)return;
         const tab=fresh.prefetch(id);
         if(tab)fresh.load(id,false,tab,false,true);
       };

@@ -23,16 +23,17 @@ async function run(){
   const sctx={syncingRef:{current:false},navigator:{onLine:true},CFG:{auth_mode:'public'},authRef:{current:null},
     DB:'user0',database:async(method,store,arg)=>{if(method==='getAll')return items.map(x=>({...x}));if(method==='put'){let idx=items.findIndex(x=>x.op_id===arg.op_id);items[idx]={...arg};return arg;}throw Error(method);},
     refreshQueue:async()=>true,loadDocument:async id=>reads.push(id),docRef:{current:{id:'current'}},
+    prefetchOrder:['LOG','INFO','TECH','TEAM'],pageRef:{current:'LOG'},invalidateTabs:(id,tabs)=>reads.push(id+':'+tabs.join(',')),setCachedView:()=>{},scheduleWriteRetry:()=>{},
     uuid:()=> 'test-lease',syncLease:async()=>true,requestBackgroundSync:()=>{},
     api:async(path,method,payload)=>{ops.push({path,id:payload.op_id});return {ok:true};},
     window:{setTimeout:()=>{}},setError:()=>{},setSyncError:()=>{},B:x=>x,Date,Math,console};
   vm.createContext(sctx);vm.runInContext(syncSource+'\nthis.syncAll=syncAll;',sctx);
   await sctx.syncAll();
-  assert.equal(ops.length,3);assert.deepEqual(reads,['current']);
+  assert.equal(ops.length,3);assert.deepEqual(reads,['current:LOG','current:LOG']);
   assert.deepEqual(items.map(x=>x.state),['synced','synced','synced']);
-  await sctx.syncAll();assert.deepEqual(reads,['current'],'empty queue must not read fresh document');
+  await sctx.syncAll();assert.deepEqual(reads,['current:LOG','current:LOG'],'empty queue must not invalidate document');
   items=[{op_id:'onlyother',state:'pending',kind:'log',doc_id:'another',created:'2026-11-24T10:01:00Z'}];
-  await sctx.syncAll();assert.deepEqual(reads,['current'],'other-incident sync must not refresh current incident');
+  await sctx.syncAll();assert.deepEqual(reads,['current:LOG','current:LOG'],'other-incident sync must not invalidate current incident');
 
   // Validate GAS date-only conversion and actual creation metadata.
   const gctx={Date,console,Utilities:{formatDate:(date,tz,pattern)=>{
@@ -77,7 +78,7 @@ async function run(){
 
   // Render a real App component with mocked React and transport: queue navigation, date preview and refresh timer.
   const injected=source.replace('    const waiting=queue.filter(o=>o.state',
-    '    window.__v072test={newDocument,loadDocument,refreshRef,syncingRef,docRef};\n    const waiting=queue.filter(o=>o.state');
+    '    window.__v072test={newDocument,loadDocument,refreshRef,syncingRef,docRef,resetSessionReads};\n    const waiting=queue.filter(o=>o.state');
   assert.notEqual(injected,source);
   const names=Array.from(source.matchAll(/const \[([A-Za-z][A-Za-z0-9]*),\s*set[A-Za-z0-9]+\]=useState\(/g)).map(x=>x[1]);
   const state={},refs={};let ix=0,rx=0,rootNode=null,arrEffects=[],polls=[],network=[],isHidden=false;
@@ -126,33 +127,33 @@ async function run(){
   const post=network.find(x=>x.url.endsWith('documents')&&x.opts.method==='POST');
   assert.ok(post);assert.equal(JSON.parse(post.opts.body).incident_date,'2026-11-25');
 
-  // Stable 2-minute polling despite unrelated queue state re-renders.
+  // Stable scheduler despite unrelated queue and draft re-renders.
   const current={id:'TEST_DOC',name:'Test incident'};
   setState('mode','session');setState('doc',current);setState('data',{LOG:[],INFO:[],TEAM:[],TECH:[],FIELD_AUDIO:{}});
   setState('draft','');setState('queue',[]);setState('docLoading',false);
   setState('auth',{kind:'public',name:'Tester'});setState('authLoading',false);
-  render();win.__v072test.docRef.current=current;
-  const effect=arrEffects.find(x=>x.fn.toString().includes('120000'));
-  assert.ok(effect,'missing 120s polling effect');
-  const baseDeps=effect.deps;effect.fn();
-  const timer=polls.find(x=>x.delay===120000);assert.ok(timer);
+  render();win.__v072test.docRef.current=current;win.__v072test.resetSessionReads();render();
+  const effect=arrEffects.find(x=>x.fn.toString().includes('window.setInterval(warm,1000)'));
+  assert.ok(effect,'missing background scheduler');
+  const baseDeps=effect.deps;
   const countRead=()=>network.filter(x=>x.url.includes('document/')).length;
-  const before=countRead();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+1,'idle active incident should auto-refresh');
-  setState('draft','draft in progress');render();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+1,'draft must block background refresh');
-  assert.deepEqual(Array.from(arrEffects.find(x=>x.fn.toString().includes('120000')).deps),Array.from(baseDeps),
-    'queue/draft updates must not restart polling interval');
-  setState('draft','');setState('queue',[{op_id:'p',doc_id:'TEST_DOC',state:'pending',kind:'log'}]);
+  const before=countRead();effect.fn();await new Promise(setImmediate);
+  const timer=polls.find(x=>x.delay===1000);assert.ok(timer);
   render();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+1,'pending local queue must block background refresh');
-  setState('queue',[]);render();isHidden=true;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+1,'hidden page must block background refresh');
+  assert.equal(countRead(),before+2,'initial LOG and next tab');
+  setState('draft','draft in progress');render();timer.fn();await new Promise(setImmediate);
+  assert.equal(countRead(),before+3,'draft remains while inactive tabs warm');
+  assert.deepEqual(Array.from(arrEffects.find(x=>x.fn.toString().includes('window.setInterval(warm,1000)')).deps),Array.from(baseDeps),
+    'queue/draft updates must not restart polling interval');
+  setState('draft','');setState('recording',true);render();timer.fn();await new Promise(setImmediate);
+  assert.equal(countRead(),before+3,'recording must pause background requests');
+  setState('recording',false);render();isHidden=true;timer.fn();await new Promise(setImmediate);
+  assert.equal(countRead(),before+3,'hidden page must pause background requests');
   isHidden=false;win.__v072test.syncingRef.current=true;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+1,'in-flight sync must block background refresh');
+  assert.equal(countRead(),before+3,'in-flight sync must block background requests');
   win.__v072test.syncingRef.current=false;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+2,'eligible page should refresh again');
+  assert.equal(countRead(),before+4,'eligible page warms fourth tab');
 
-  console.log('PASS v0.7.2: batch refresh coalesced; calendar-date propagation; read-only GAS; queue mobile/public access; 120s safe polling.');
+  console.log('PASS v0.7.2: write ACK invalidation; calendar-date propagation; read-only GAS; queue mobile/public access; background warm scheduler.');
 }
 run().catch(e=>{console.error(e.stack||e);process.exitCode=1;});
