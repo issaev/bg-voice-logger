@@ -1,6 +1,6 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status:** proposed release plan / living backlog, not an approved release schedule.
+> **Status:** v0.7.1 is operator-reported production; v0.7.2 and v0.8.0 remain proposed. Acceptance of v0.7.1 is not complete.
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
@@ -38,7 +38,7 @@ The operator reports **v0.7.1 deployed in production**, supported by a read-only
 - **8 of 8 isolated Node tests passed** using extracted installed functions and mocked storage/UI, including atomic orphan cleanup, durable-save status, TEAM/TECH form preservation, footer unsaved-audio warning, stable retry ID, and a Blob conversion control.
 - **Not yet verified end to end:** real Safari/IndexedDB, Google OAuth, deployed Apps Script version, Google Sheets/Drive data writes, cross-device media playback, conflict/retry/parallel-tab behavior. The 8 tests do **not** establish acceptance for INFO comments [#8](https://github.com/issaev/bg-voice-logger/issues/8) or the incident chooser [#11](https://github.com/issaev/bg-voice-logger/issues/11) on production.
 - Remaining known performance problems: [#6](https://github.com/issaev/bg-voice-logger/issues/6) duplicate LOG refresh reads and [#7](https://github.com/issaev/bg-voice-logger/issues/7) complete audio download before playback. These belong to later work.
-- **Source control drift:** public GitHub `main` still contains v0.7.0; [draft PR #13](https://github.com/issaev/bg-voice-logger/pull/13) contains the v0.7.1 source. **Do not start the next feature branch from obsolete main** until the release source is reconciled. PR #13 remains unmerged pending separate explicit approval. Keep all Issue acceptance criteria open until verified.
+- **Source control synchronized:** [PR #13](https://github.com/issaev/bg-voice-logger/pull/13) was merged into `main` on 2026-11-24 (merge commit `ab04e1db5f351db5edc7feb8fc8c7b28ccdd7e55`). This did not deploy code. New feature branches can now start from `main`. All P1 issues remain open until end-to-end acceptance.
 
 The report was obtained without modifying production code, data, caches or queues. Do not claim full production validation or invent missing benchmark values.
 
@@ -148,4 +148,4 @@ A proposed version is ready to ship only if **all** checks relevant to its scope
 
 ---
 
-*This roadmap combines the original REQ-026 audit with a subsequently reported v0.7.1 production deployment. Full end-to-end validation and reconciliation of GitHub main with the deployed release remain outstanding.*
+*This roadmap combines the original REQ-026 audit with the subsequently reported v0.7.1 production deployment. GitHub main is synchronized to the v0.7.1 public source; private site configuration and end-to-end runtime acceptance remain outside this reconciliation.*
