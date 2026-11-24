@@ -254,3 +254,30 @@
 #bvlog-root .bv-render-recovery p{margin:0 0 12px;}
 #bvlog-root .bv-render-recovery button{border:0;background:#0f355b;color:white;font:inherit;
  border-radius:10px;padding:12px 18px;cursor:pointer;}
+
+/* v0.7.2 — visible sticky queue, freshness and accessible mobile actions */
+#bvlog-root .bv-shell { overflow:visible; }
+#bvlog-root .bv-header { position:sticky;top:0;z-index:100;box-shadow:0 3px 8px rgba(7,25,43,.16); }
+#bvlog-root .bv-queue-toggle { font-weight:800;min-height:42px;padding:8px 11px;white-space:nowrap; }
+#bvlog-root .bv-queue-toggle.has-alert { background:#fff1d4;color:#743b08;border-color:#e5aa52; }
+#bvlog-root .bv-queue-count { border-radius:12px;min-width:20px;padding:2px 5px;text-align:center;background:#ffffff28;font-size:12px; }
+#bvlog-root .bv-queue-toggle.has-alert .bv-queue-count {background:#ffdb9a;}
+#bvlog-root .bv-queue-review-count {padding:8px 12px;border:1px solid #ead09e;background:#fff3d9;border-radius:9px;color:#744008;font-weight:800;}
+#bvlog-root .bv-action-buttons {display:flex;align-items:center;gap:4px;}
+#bvlog-root .bv-fresh-label {font-size:11px;color:#4b657d;text-align:right;max-width:185px;line-height:1.25;}
+#bvlog-root .bv-fresh-label small {display:block;font-size:10px;color:#72869b;}
+#bvlog-root .bv-action-buttons .bv-icon-btn {min-width:38px;min-height:38px;justify-content:center;}
+@media(max-width:510px){
+  #bvlog-root .bv-header {padding:10px 8px;}
+  #bvlog-root .bv-brand strong {font-size:11px;}
+  #bvlog-root .bv-brand .bv-build-id {display:none;}
+  #bvlog-root .bv-queue-toggle {padding:5px 7px;min-height:38px;}
+  #bvlog-root .bv-queue-label {font-size:11px;}
+  #bvlog-root .bv-fresh-label {max-width:138px;font-size:10px;}
+  #bvlog-root .bv-fresh-label small {display:none;}
+}
+@media(max-width:370px){
+  #bvlog-root .bv-connect {display:none;}
+  #bvlog-root .bv-brand-icon {min-width:32px;min-height:32px;}
+  #bvlog-root .bv-brand-icon img {width:30px;height:30px;}
+}
