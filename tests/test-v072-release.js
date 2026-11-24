@@ -8,7 +8,7 @@ const source=fs.readFileSync(path.join(root,'assets/app.js'),'utf8');
 const gas=fs.readFileSync(path.join(root,'apps-script/Code.gs'),'utf8');
 const php=fs.readFileSync(path.join(root,'includes/class-bvlog-api.php'),'utf8');
 const marker=source.match(/const BVLOG_RUNNING_BUILD = '([^']+)'/)[1];
-assert.match(marker,/^0\.8\.0-[a-f0-9]{12}$/);
+assert.match(marker,/^0\.8\.0\.1-[a-f0-9]{12}$/);
 function extract(s,a,b){const x=s.indexOf(a),y=s.indexOf(b,x+a.length);assert(x>=0&&y>x,'Extraction failed: '+a);return s.slice(x,y);}
 function flatten(v,out=[]){if(v==null||typeof v==='string'||typeof v==='number'||typeof v==='boolean')return out;if(Array.isArray(v)){v.forEach(x=>flatten(x,out));return out;}if(typeof v.type==='function')return flatten(v.type({...v.props,children:v.children}),out);out.push(v);(v.children||[]).forEach(x=>flatten(x,out));return out;}
 function textOf(v){if(v==null||typeof v==='boolean')return '';if(Array.isArray(v))return v.map(textOf).join('');if(typeof v==='object')return textOf(v.children);return String(v);}

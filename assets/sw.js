@@ -109,7 +109,7 @@ function bgDBName(session) {
 async function bgSession() {
   const base = bgUrl(self.BVLOG_API_ROOT);
   if (!base) return null;
-  const response = await fetch(new URL('auth/session', base).href,
+  const response = await fetch(new URL('auth/session?background=1', base).href,
     {credentials:'same-origin',cache:'no-store',redirect:'error'});
   if (!response.ok) return null;
   const session = await response.json();

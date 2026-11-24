@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.0-5e642967a700';
+  const BVLOG_RUNNING_BUILD = '0.8.0.1-b9391cb399e3';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -255,7 +255,7 @@
     return Math.round(base*(0.8+0.4*Math.random()));
   }
   async function api(path, method, data, signal) {
-    const opts = {method:method||'GET',headers:{},credentials:'same-origin'};
+    const opts = {method:method||'GET',headers:{},credentials:'same-origin',cache:'no-store'};
     if(signal)opts.signal=signal;
     if (CFG.nonce && CFG.user && CFG.user.id) opts.headers['X-WP-Nonce']=CFG.nonce;
     if (CFG.csrf) opts.headers['X-BVLOG-CSRF']=CFG.csrf;
@@ -336,6 +336,23 @@
   }
   function Button({children,onClick,secondary,disabled,className,type}) {
     return h('button',{type:type||'button',className:'bv-btn '+(secondary?'secondary ':'')+(className||''),disabled:!!disabled,onClick:onClick},children);
+  }
+  // A Google popup may take longer than the login cookie lifetime. Obtain
+  // the challenge immediately before exchanging the credential. One bounded
+  // retry is safe only for an explicit challenge rejection, before JWT verification.
+  async function exchangeGoogleCredential(credential) {
+    for(let attempt=0;attempt<2;attempt++){
+      const fresh=await api('auth/session');
+      CFG.login_challenge=fresh.login_challenge||'';
+      if(!/^[a-f0-9]{40}$/.test(CFG.login_challenge))
+        throw new Error('Не може да се получи защитен код за вход. Опитай отново.');
+      try{
+        return await api('auth/google','POST',{credential});
+      }catch(e){
+        if(e.code!=='bvlog_login_csrf')throw e;
+        if(attempt===1)throw new Error('Входът не може да потвърди защитната бисквитка. Провери дали браузърът позволява бисквитки за сайта и опитай отново.');
+      }
+    }
   }
   function loadGIS() {
     if(window.google && google.accounts && google.accounts.id) return Promise.resolve();
@@ -436,6 +453,7 @@
     const [authLoading,setAuthLoading]=useState(true);
     const [loginChallenge,setLoginChallenge]=useState('');
     const [loginError,setLoginError]=useState('');
+    const loginInFlightRef=useRef(false);
     const [queueOpen,setQueueOpen]=useState(false);
     const [showCompletedQueue,setShowCompletedQueue]=useState(false);
     const [photos,setPhotos]=useState([]);
@@ -655,7 +673,7 @@
       }catch(err){if(requestId===galleryRequestRef.current)setGalleryError(err.message);}finally{if(requestId===galleryRequestRef.current)setGalleryBusy(false);}
     }
     async function checkAuth() {
-      setAuthLoading(true);
+      setAuthLoading(true);setLoginError('');
       try {
         const response=await api('auth/session');
         CFG.login_challenge=response.login_challenge||'';
@@ -692,15 +710,18 @@
         if(!mount)return;
         mount.innerHTML='';
         google.accounts.id.initialize({client_id:CFG.google_client_id,ux_mode:'popup',callback:async ({credential})=>{
+          if(loginInFlightRef.current)return;
+          loginInFlightRef.current=true;
           try{
             setLoginError('');
-            const data=await api('auth/google','POST',{credential});
+            const data=await exchangeGoogleCredential(credential);
             if(!data.ok)throw new Error(data.message||'Google login failed');
             CFG.csrf=data.csrf||'';
             await bindUserQueue(data.identity);
             try {localStorage.setItem('bvlog-last-identity',JSON.stringify({identity:data.identity,time:Date.now()}));} catch(e) {}
             setAuth(data.identity);
           }catch(e){setLoginError(e.message);}
+          finally{loginInFlightRef.current=false;}
         }});
         google.accounts.id.renderButton(mount,{theme:'outline',size:'large',shape:'pill',text:'signin_with',width:260});
       }).catch(e=>{if(active)setLoginError(e.message);});
@@ -1975,7 +1996,8 @@
           h('h1',null,'Документ за координация на акция'),
           h('p',null,'Влез с одобрен Google акаунт, без WordPress регистрация.'),
           CFG.google_client_id ? h('div',{id:'bvlog-google-signin'}) : h('p',{className:'bv-banner error'},'Администраторът трябва да настрои Google OAuth Client ID.'),
-          loginError&&h('p',{className:'bv-banner error'},loginError))) :
+          loginError&&h('p',{className:'bv-banner error'},loginError),
+          loginError&&h(Button,{secondary:true,onClick:checkAuth,disabled:authLoading||!online},'Опитай отново'))) :
       !auth && CFG.auth_mode==='wordpress' ? h('main',{className:'bv-content'},h('div',{className:'bv-card'},
         'Необходим е WordPress вход.', h('a',{href:'/wp-login.php?redirect_to='+encodeURIComponent(location.href)},'Вход'))) :
       mode==='choose' ? h('main',{className:'bv-content'},

@@ -69,10 +69,20 @@ class BVLOG_Auth {
         }
         return true;
     }
-    public static function session() {
-        // Login challenge protects the credential exchange from login CSRF.
-        $challenge=bin2hex(random_bytes(20));
-        setcookie(self::CHALLENGE,$challenge,array('expires'=>time()+600,'path'=>'/','secure'=>true,'httponly'=>true,'samesite'=>'Lax'));
+    public static function session($request=null) {
+        // Background identity checks must not replace the login CSRF cookie.
+        // Reuse an existing unexpired browser cookie across foreground tabs.
+        $background=$request && (string)$request->get_param('background')==='1';
+        $challenge='';
+        if (!$background) {
+            $existing=(string)($_COOKIE[self::CHALLENGE]??'');
+            if (preg_match('/^[a-f0-9]{40}$/D',$existing)) {
+                $challenge=$existing;
+            } else {
+                $challenge=bin2hex(random_bytes(20));
+                setcookie(self::CHALLENGE,$challenge,self::cookie_params(time()+600));
+            }
+        }
         $identity=self::identity();
         return rest_ensure_response(array(
             'authenticated'=>($identity!==null),
@@ -142,7 +152,7 @@ class BVLOG_Auth {
         if (!preg_match('/^[0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com$/',$client))return new WP_Error('bvlog_google_config','Google Client ID is missing or invalid.',array('status'=>503));
         $sent=(string)$request->get_header('X-BVLOG-LOGIN');
         $expected=(string)($_COOKIE[self::CHALLENGE]??'');
-        if (!$sent||strlen($expected)<32||!hash_equals($expected,$sent))return new WP_Error('bvlog_login_csrf','Refresh the page before signing in.',array('status'=>403));
+        if (!preg_match('/^[a-f0-9]{40}$/D',$sent)||!preg_match('/^[a-f0-9]{40}$/D',$expected)||!hash_equals($expected,$sent))return new WP_Error('bvlog_login_csrf','Refresh the page before signing in.',array('status'=>403));
         $visitor=md5((string)($_SERVER['REMOTE_ADDR']??'guest'));
         $ratekey='bvlog_google_login_'.$visitor;
         $attempts=(int)get_transient($ratekey);

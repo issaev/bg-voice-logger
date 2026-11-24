@@ -1,4 +1,4 @@
-// Isolated v0.8.0 mobile UX and free-name Sheets regression, no live data.
+// Isolated v0.8.0.1 mobile UX and free-name Sheets regression, no live data.
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
@@ -20,7 +20,7 @@ assert.ok(!app.includes('getUserMedia({video:'),'Do not launch camera without an
 const match=app.match(/const BVLOG_RUNNING_BUILD = '([^']+)'/);assert.ok(match);
 const canonical=app.replace(/const BVLOG_RUNNING_BUILD = '[A-Za-z0-9._-]+';/,
   "const BVLOG_RUNNING_BUILD = '__BUILD_PLACEHOLDER__';");
-const expected='0.8.0-'+crypto.createHash('sha256').update(canonical).digest('hex').slice(0,12);
+const expected='0.8.0.1-'+crypto.createHash('sha256').update(canonical).digest('hex').slice(0,12);
 assert.equal(match[1],expected,'Incorrect embedded JS build marker');
 // The specified bright red must remain readable against the dark-blue header.
 const rgb=hex=>hex.slice(1).match(/../g).map(v=>parseInt(v,16)/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4);
@@ -45,7 +45,7 @@ function flatten(v,out=[]){if(v==null||typeof v==='string'||typeof v==='number'|
  out.push(v);for(const item of v.children||[])flatten(item,out);return out;}
 function textValue(v){if(v==null||typeof v==='boolean')return '';if(typeof v==='string'||typeof v==='number')return String(v);
  if(Array.isArray(v))return v.map(textValue).join(' ');return textValue(v.children||[])}
-const w={BVLOG_CONFIG:{api:'/wp-json/',auth_mode:'public',stt_mode:'none',user:{id:0},plugin_version:'0.8.0',expected_build:match[1],logo_url:'/logo.png'},
+const w={BVLOG_CONFIG:{api:'/wp-json/',auth_mode:'public',stt_mode:'none',user:{id:0},plugin_version:'0.8.0.1',expected_build:match[1],logo_url:'/logo.png'},
  setTimeout:()=>{},setInterval:()=>1,clearInterval:()=>{}};
 const ctx={window:w,wp:{element:{createElement:h,
  useState:init=>{const i=stateIndex++;if(!(i in slots))slots[i]=typeof init==='function'?init():init;
