@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-613947b7e695';
+  const BVLOG_RUNNING_BUILD = '0.7.2.1-39f13c8d4238';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -307,10 +307,11 @@
     pctx.drawImage(cv,Math.round((640-w)/2),Math.round((480-hh)/2),w,hh);
     let previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.7));
     if(previewBlob&&previewBlob.size>350000)previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.42));
+    const previewSrc=preview.toDataURL('image/jpeg',0.65);
     preview.width=0;preview.height=0;cv.width=0;cv.height=0;
     if(!blob||blob.size>2400000)throw new Error('Снимката е твърде голяма след компресиране.');
     if(!previewBlob||previewBlob.size>350000)throw new Error('Неуспешно създаване на миниатюра.');
-    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg'};
+    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg',previewSrc};
   }
   // Capture a calendar day in Sofia, not a UTC timestamp.
   function sofiaTodayISO(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Sofia'});}
@@ -1039,15 +1040,26 @@
       }
     }
     async function uploadExistingPhoto(entry,files) {
+      if(!doc||!entry||!Array.isArray(entry.cells))return;
+      const targetDoc={id:doc.id,name:doc.name};
+      const selected=Array.from(files||[]).slice(0,3);
+      if(!selected.length)return;
+      setPhotoBusy(true);
       try {
-        if(!doc)return;
-        for(const file of Array.from(files||[]).slice(0,3)){
+        let saved=0;
+        for(const file of selected){
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
           const image=await preparePhoto(file);
-          await enqueue({kind:'photo',doc_id:doc.id,doc_name:doc.name,
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
+          const ok=await enqueue({kind:'photo',doc_id:targetDoc.id,doc_name:targetDoc.name,
             target_row:entry.row,expected_time:entry.cells[1],expected_text:entry.cells[3],
             blob:image.blob,preview_blob:image.previewBlob,filename:image.name,mime:image.mime});
+          if(!ok)throw new Error('Снимката не е запазена локално.');
+          saved++;
         }
+        if(saved)setNotice('Снимките са запазени локално за изпращане.');
       }catch(e){setError(e.message);}
+      finally{setPhotoBusy(false);}
     }
     function canDiscardInterruptedAudio(o){
       return o && o.kind==='audio_upload' && o.state==='sending' &&
@@ -1633,7 +1645,7 @@
     return h('div',{className:'bv-shell '+((audioPlayer||audioBusy)?'bv-has-audio':'')},
       h('header',{className:'bv-header'},
         h('div',{className:'bv-brand'},h('span',{className:'bv-brand-icon'},h('img',{src:CFG.logo_url||'',alt:'СКБ'})),
-          h('div',null,h('strong',null,'Документ за координация на акция'),h('small',null,'Спасителен клуб за бъдеще'),
+          h('div',null,h('strong',{className:'bv-brand-title'},'Документ за Координация на Акция'),h('small',null,'Спасителен клуб за бъдеще'),
             h('small',{className:'bv-build-id',title:'Running JavaScript build (not the HTML-configured version)'},
               'WP '+(CFG.plugin_version||'?')+' / JS '+BVLOG_RUNNING_BUILD))),
         h('div',{className:'bv-top-controls'},
@@ -1687,6 +1699,7 @@
             h('button',{type:'button',onClick:loadDocs,disabled:docsLoading},'Опитай отново')),
           docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>setSelectedDoc(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
+          docs.length&&h('small',{className:'bv-doc-folder-hint'},'Всички показани таблици са от папката — независимо от името.'),
           h(Button,{disabled:!selectedDoc,onClick:()=>startSession(docs.find(d=>d.id===selectedDoc))},icon('arrow',18),' ',B('Otvori aktsiyata'))),
         h('div',{className:'bv-or'},B('ILI')),
         h('div',{className:'bv-card'},
@@ -1763,12 +1776,13 @@
               h('button',{onClick:submitText,disabled:!draft.trim(),title:B('Zapishi')},icon('arrow',20)))),
           h('div',{className:'bv-photo-tools'},
             h('label',{className:'bv-photo-pick'},icon('image',17),' Качи снимка',
-              h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+              h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
             h('label',{className:'bv-photo-pick'},icon('camera',17),' Снимай',
-              h('input',{type:'file',accept:'image/*',capture:'environment',onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+              h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
             photoBusy&&h('small',null,'Обработва снимката...'),
             photos.length>0&&h('button',{className:'bv-photo-pick',onClick:submitPhotoOnly},icon('upload',16),' Запиши само снимка'),
-            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},p.name,
+            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},
+              p.previewSrc&&h('img',{className:'bv-photo-chip-preview',src:p.previewSrc,alt:'Преглед на снимка'}),p.name,
               h('button',{title:'Премахни снимката',onClick:()=>setPhotos(q=>q.filter((_,j)=>j!==i))},icon('close',13))))),
           h('div',{className:'bv-section-head'},h('h3',null,B('Posledni sqbitiya')),
             h('button',{className:'bv-icon-btn',onClick:()=>loadDocument(doc.id),title:B('Obnovi')},icon('refresh',18))),
@@ -1819,8 +1833,10 @@
                     x.audio&&h('button',{type:'button',className:'bv-photo-indicator',
                       disabled:audioBusy===x.audio.id,onClick:()=>playRemoteAudio(x)},icon('play',15),
                       audioBusy===x.audio.id?' Зарежда аудиото...':' Чуй оригинала'),
-                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' Прикачи снимка',
-                      h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' От галерията',
+                      h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h('label',{className:'bv-attach-inline bv-attach-camera'},icon('camera',15),' Снимай',
+                      h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
                     !cancelled&&h('button',{type:'button',className:'bv-event-menu-button',
                       'aria-label':'Действия за събитието','aria-expanded':eventMenu===x.row,
                       onClick:()=>setEventMenu(eventMenu===x.row?null:x.row)},icon('more',20))),
@@ -1944,7 +1960,6 @@
           h('div',{className:'bv-row spread'},h('h3',null,'Локална опашка — '+waiting+' чакащи'),
             h('button',{className:'bv-icon-btn',onClick:()=>setQueueOpen(false)},icon('close',20))),
           h('p',{className:'bv-muted'},'Всеки запис е свързан с конкретен документ. Синхронизираните записи не могат да се изтрият оттук.'),
-          CFG.auth_mode==='google'&&h('button',{className:'bv-retry-op',onClick:importLegacyQueue},'Импорт на стари записи от v0.2.2'),
           localSaveFailed&&h('div',{className:'bv-unsaved-audio',role:'alert'},
             h('strong',null,'Има незапазено аудио!'),
             h('button',{type:'button',onClick:()=>downloadBlob(unsavedAudio.blob,unsavedAudio.when)},'Изтегли резервно копие'),
