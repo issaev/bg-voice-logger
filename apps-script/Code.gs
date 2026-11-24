@@ -440,10 +440,13 @@ function bvlField_(ss,p) {
   const sheet=ss.getSheetByName(name);
   if(!sheet)return {ok:false,code:'sheet_missing',message:name+' was removed. Other tabs remain available.'};
   let row=Number(p.row),col=String(p.col||'').toUpperCase();
+  let isAction=false;
   if(name==='INFO'){
     const target=bvlFindInfoField_(sheet,p);
     if(target.error)return {ok:false,code:'row_moved',message:target.error};
     row=target.row;col=target.col;
+    isAction=bvlNorm_(target.record.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f') &&
+      !!(target.record.fields[0]&&target.record.fields[0].col===col);
   }else if(!Number.isInteger(row)||row<3||row>5000||!/^[B-Z]{1,2}$/.test(col)){
     return {ok:false,code:'protected_range',message:'Invalid sheet row or column.'};
   }
@@ -460,7 +463,6 @@ function bvlField_(ss,p) {
   }
   if(current!==base)return {ok:false,code:'conflict',message:'Google Sheets value changed since you edited it.',current:current,row:row,col:col};
   // Read the live validation of the target cell, without rebuilding its rule.
-  const isAction=name==='INFO'&&bvlNorm_(p.field_label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f');
   const rule=ref.getDataValidation();
   if(rule && ![SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST,
       SpreadsheetApp.DataValidationCriteria.VALUE_IN_RANGE].includes(rule.getCriteriaType())){
