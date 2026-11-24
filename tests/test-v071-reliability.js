@@ -34,7 +34,7 @@ async function run(){
    uuid:()=> 'stable-uuid',ANONYMOUS:true,operatorName:'Operator',authRef:{current:null},
    CFG:{user:null,stt_mode:'none',stt_cloud:false},docRef:{current:null},docs:[],
    database:async()=>{commits++;return true;},refreshQueue:async()=>{throw Error('UI read failed');},
-   setError:s=>saves.push(s),setNotice:s=>uiNotices.push(s),B:s=>s,
+   setError:s=>saves.push(s),setLocalStoreError:s=>saves.push(s),setNotice:s=>uiNotices.push(s),B:s=>s,
    navigator:{onLine:false},window:{setTimeout:()=>{}},console
  };
  vm.createContext(context);
