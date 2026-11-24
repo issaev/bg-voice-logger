@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2-c6f4de4c832a';
+  const BVLOG_RUNNING_BUILD = '0.7.2-2d9600a6493a';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -231,11 +231,31 @@
   function timeOf(time) {
     return new Date(time||Date.now()).toLocaleTimeString('bg-BG',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Sofia'});
   }
+  // One journal feed: an operation keeps the same identity from a local voice
+  // recording through confirmation, upload and the first successful Sheets read.
+  function journalEntries(queue,logs,docId,limit) {
+    const remote=(Array.isArray(logs)?logs:[]).filter(x=>x&&x.row>=2).slice().reverse();
+    const serverIds=new Set(remote.map(x=>String((x.cells||[])[6]||'')).filter(Boolean));
+    const local=(Array.isArray(queue)?queue:[]).filter(o=>o&&o.doc_id===docId &&
+      o.state!=='cancelled' && (o.kind==='log'||(o.kind==='audio'&&
+        !(o.target&&o.target.kind==='field'))) && !serverIds.has(String(o.op_id||'')))
+      .slice().sort((a,b)=>String(b.event_at||b.created||'').localeCompare(String(a.event_at||a.created||'')));
+    // The same React key is used when a local op becomes a server-backed row.
+    return local.map(o=>({key:'log:'+o.op_id,local:o})).concat(remote.map(x=>({
+      key:(x.cells||[])[6]?'log:'+String(x.cells[6]):'legacy-row:'+x.row,remote:x
+    }))).slice(0,limit||35);
+  }
+  function isLocalJournalOp(o,docId) {
+    return !!(o&&docId&&o.doc_id===docId&&
+      (o.kind==='log'||(o.kind==='audio'&&!(o.target&&o.target.kind==='field'))));
+  }
   function EntryStatus({status}) {
     const m = {
       synced:['check',B('Sinhronizirano'),'good'], pending:['clock',B('V opashkata'),'wait'],
       sending:['refresh',B('Izprashta se'),'wait'], local_error:['alert','Проблем с локалното аудио','bad'], conflict:['alert',B('Konflikt'),'bad'],
-      audio:['mic',B('Chaka transkriptsiya'),'wait'], transcribing:['refresh',B('Transkribira se'),'wait'], review:['edit',B('Proveri poleto'),'wait'], photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
+      audio:['mic',B('Chaka transkriptsiya'),'wait'], transcribing:['refresh',B('Transkribira se'),'wait'],
+      voice_review:['edit','За потвърждение','wait'], review:['edit',B('Proveri poleto'),'wait'],
+      photo:['image',B('Chaka kachvane'),'wait'], cancelled:['close',B('Otkazano'),'muted']
     };
     const x = m[status]||['alert',B('Greshka'),'bad'];
     return h('span',{className:'bv-status '+x[2]},icon(x[0],14),x[1]);
@@ -327,6 +347,7 @@
     const [photoBusy,setPhotoBusy]=useState(false);
     const [gpsBusy,setGpsBusy]=useState(false);
     const [voiceIssue,setVoiceIssue]=useState('');
+    const [voiceReviewDrafts,setVoiceReviewDrafts]=useState({});
     const [queue,setQueue]=useState([]);
     const [busy,setBusy]=useState(false);
     const [error,setError]=useState('');
@@ -1345,13 +1366,50 @@
       }
       await database('put','queue',newer);await refreshQueue();
     }
+    function voiceDraft(o) {
+      return Object.prototype.hasOwnProperty.call(voiceReviewDrafts,o.op_id)?
+        voiceReviewDrafts[o.op_id]:(o.transcript||'');
+    }
+    function updateVoiceDraft(o,text) {
+      setVoiceReviewDrafts(old=>Object.assign({},old,{[o.op_id]:text}));
+    }
+    function clearVoiceDraft(opId) {
+      setVoiceReviewDrafts(old=>{const next=Object.assign({},old);delete next[opId];return next;});
+    }
     async function approveVoice(o){
-      const stored=await database('get','queue',o.op_id);
-      if(!stored||stored.state!=='voice_review')return;
-      const area=document.getElementById('bv-audio-review-'+o.op_id);
-      const text=area?area.value:(stored.transcript||'');
-      await audioToText(Object.assign({},stored,{state:'audio'}),text,null);
-      setNotice('Провереният текст е добавен за синхронизация.');
+      try {
+        const stored=await database('get','queue',o.op_id);
+        if(!stored||stored.state!=='voice_review')return;
+        const text=voiceDraft(stored).trim();
+        if(!text){setError('Потвърди текста на гласовия запис.');return;}
+        await audioToText(Object.assign({},stored,{state:'audio'}),text,null);
+        const updated=await database('get','queue',o.op_id);
+        if(updated&&updated.kind==='log'){
+          clearVoiceDraft(o.op_id);
+          setNotice('Провереният текст е добавен за синхронизация.');
+        }
+      }catch(e){setError('Потвърждение на диктовката: '+e.message);}
+    }
+    async function saveAudioText(o){
+      try {
+        const text=voiceDraft(o).trim();
+        if(!text)return;
+        await audioToText(o,text,null);
+        const updated=await database('get','queue',o.op_id);
+        if(updated&&updated.kind==='log')clearVoiceDraft(o.op_id);
+      }catch(e){setError('Ръчна транскрипция: '+e.message);}
+    }
+    function voiceInputControls(o) {
+      const text=voiceDraft(o);
+      return h('div',{className:'bv-inline-voice-review'},
+        o.state==='voice_review'&&h('p',{className:'bv-voice-issue'},
+          'Провери транскрипцията и прослушай оригинала преди изпращане.'),
+        h('textarea',{className:'bv-textarea',value:text,maxLength:3000,
+          'aria-label':'Транскрипция за проверка',
+          placeholder:'Въведи или поправи текста на гласовия запис...',
+          onChange:e=>updateVoiceDraft(o,e.target.value)}),
+        h(Button,{disabled:!text.trim(),onClick:()=>o.state==='voice_review'?approveVoice(o):saveAudioText(o)},
+          o.state==='voice_review'?'Потвърди и запиши':'Запиши текста'));
     }
 
     async function toggleFieldVoice() {
@@ -1540,6 +1598,7 @@
         || String(b.created||'').localeCompare(String(a.created||'')));
     const myQueue=queue.filter(o=>!doc||o.doc_id===doc.id).slice().reverse();
     const logs=data&&data.LOG||[];
+    const journalFeed=journalEntries(queue,logs,doc&&doc.id,35);
     const title=doc&&doc.name||'Документ за координация на акция';
     function loadingRows(label){
       return h('div',{className:'bv-loading-rows',role:'status','aria-live':'polite'},
@@ -1683,28 +1742,46 @@
               h('button',{title:'Премахни снимката',onClick:()=>setPhotos(q=>q.filter((_,j)=>j!==i))},icon('close',13))))),
           h('div',{className:'bv-section-head'},h('h3',null,B('Posledni sqbitiya')),
             h('button',{className:'bv-icon-btn',onClick:()=>loadDocument(doc.id),title:B('Obnovi')},icon('refresh',18))),
-          h('div',{className:'bv-local-entries'},
-            myQueue.filter(o=>o.kind==='log'&&['pending','sending','error'].includes(o.state)).map(o=>
-              h('div',{className:'bv-event bv-local-event',key:o.op_id},
-                h('span',{className:'bv-event-time'},timeOf(o.event_at)),
-                h('div',{className:'bv-event-body'},h('strong',null,o.text),h(EntryStatus,{status:o.state}),
-                  queue.some(item=>item.kind==='audio_upload'&&item.target_id===o.op_id&&hasQueueMedia(item))&&
-                    h(Button,{secondary:true,onClick:()=>{const a=queue.find(item=>item.kind==='audio_upload'&&item.target_id===o.op_id&&hasQueueMedia(item));if(a)playQueueAudio(a);}},'Чуй оригинала'),
-                  queue.filter(item=>item.kind==='photo'&&item.log_op_id===o.op_id&&hasQueueMedia(item)&&item.state!=='cancelled').length>0&&
-                    h('div',{className:'bv-event-photos'},h('button',{className:'bv-photo-indicator pending',
-                      onClick:()=>openLocalGallery(o)},icon('image',16),' Чакащи снимки (',
-                      queue.filter(item=>item.kind==='photo'&&item.log_op_id===o.op_id&&hasQueueMedia(item)&&item.state!=='cancelled').length,')')))))),
           h('div',{className:'bv-events'},
             !data&&docLoading&&loadingRows('Зареждане на последните събития...'),
-            logs.slice().reverse().filter(x=>x.row>=2).slice(0,35).map(x=>{
+            journalFeed.map(item=>{
+              if(item.local){
+                const o=item.local;
+                const child=queue.find(q=>q.kind==='audio_upload'&&q.target_id===o.op_id&&hasQueueMedia(q));
+                const playable=hasQueueMedia(o)?o:child;
+                const photoCount=queue.filter(q=>q.kind==='photo'&&q.log_op_id===o.op_id&&
+                  hasQueueMedia(q)&&q.state!=='cancelled').length;
+                return h('div',{className:'bv-event bv-local-event',key:item.key},
+                  h('span',{className:'bv-event-time'},timeOf(o.event_at||o.created)),
+                  h('div',{className:'bv-event-body'},
+                    h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
+                    o.state==='synced'?
+                      h('span',{className:'bv-status wait'},icon('refresh',14),
+                        'Записано в Google · очаква опресняване'):
+                      h(EntryStatus,{status:o.state}),
+                    (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
+                    playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
+                      icon('play',15),' Чуй оригинала'),
+                    photoCount>0&&h('div',{className:'bv-event-photos'},
+                      h('button',{className:'bv-photo-indicator pending',onClick:()=>openLocalGallery(o)},
+                        icon('image',16),' Чакащи снимки (',photoCount,')')),
+                    o.error&&h('small',{className:'bv-voice-issue'},'Последна грешка: '+o.error),
+                    o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{
+                      await database('put','queue',Object.assign({},o,{state:'pending'}));
+                      await refreshQueue();syncAll();
+                    }},'Повтори изпращането')));
+              }
+              const x=item.remote;
               const c=x.cells,divider=String(c[3]||'').startsWith('ДАТА:');
-              if(divider)return h('div',{key:x.row,className:'bv-day-divider'},c[3]);
+              if(divider)return h('div',{key:item.key,className:'bv-day-divider'},c[3]);
               const cancelled=x.status==='cancelled';
-              return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:x.row},
+              return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:item.key},
                 h('span',{className:'bv-event-time'},c[1]||'--:--'),
                 h('div',{className:'bv-event-body'},
                   h('strong',null,c[3]||''),
                   h('small',null,(cancelled?'АНУЛИРАНО · ':'')+(c[2]||'')+(c[4]?' | '+c[4]:'')),
+                  !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
+                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано'),
                   h('div',{className:'bv-event-photos'},
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
@@ -1726,7 +1803,7 @@
                     expandedHistory===x.row&&x.history.map((v,i)=>h('small',{key:i},
                       (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||''))))));
             }),
-            data&&!logs.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
+            data&&!journalFeed.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
 
         ) : page==='INFO' ? h('section',{className:'bv-form-screen'},
           h('h2',null,B('Osnovni danni')),h('p',{className:'bv-muted'},B('Izberi pole, za da go promenish.')),
@@ -1782,9 +1859,11 @@
               localSaveFailed?B('Audioto NE e zapazeno lokalno'):waiting?waiting+' '+B('chakashti operatsii'):B('Vsichko e sinhronizirano')),
             h('button',{className:'bv-plain',onClick:syncAll,disabled:!online},icon('refresh',16),' ',B('Sinhroniziray'))),
           h('button',{className:'bv-plain',onClick:closeSession,disabled:recording},icon('back',16),' ',B('Smeni aktsiyata')))),
-      (queue.some(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state)))&&h('section',{className:'bv-pending'},
+      (myQueue.some(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
+        !isLocalJournalOp(o,doc&&doc.id)))&&h('section',{className:'bv-pending'},
         h('h3',null,B('Operatsii za proverka')),
-        myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state)).map(o=>h('div',{className:'bv-card',key:o.op_id},
+        myQueue.filter(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state) &&
+          !isLocalJournalOp(o,doc&&doc.id)).map(o=>h('div',{className:'bv-card',key:o.op_id},
           h(EntryStatus,{status:o.state}),
           h('p',{className:'bv-muted'},'Акция: '+queueTarget(o)+(o.target&&o.target.kind==='field'?' · '+(o.target.sheet||'')+' '+(o.target.col||'')+(o.target.row||''):'')),
           h('p',null,o.kind==='field'?(o.sheet+' '+o.col+o.row+' : '+o.value):o.kind==='audio'?B('Audio zapis ot ')+timeOf(o.event_at):o.error),
@@ -1851,12 +1930,10 @@
             o.state==='review'&&h(Button,{onClick:()=>reviewAudioField(o)},'Прегледай и запиши полето'),
             o.state==='voice_review'&&h('div',null,
               hasQueueMedia(o)&&h(Button,{secondary:true,onClick:()=>playQueueAudio(o)},'Чуй оригинала'),
-              h('textarea',{id:'bv-audio-review-'+o.op_id,defaultValue:o.transcript||'',maxLength:3000}),
-              h(Button,{onClick:()=>approveVoice(o)},'Потвърди транскрипцията')),
+              voiceInputControls(o)),
             o.state==='audio'&&hasQueueMedia(o)&&h('div',{className:'bv-row'},
               h(Button,{secondary:true,onClick:()=>playQueueAudio(o)},'Прослушай'),
-              h('textarea',{id:'audioQueue-'+o.op_id,defaultValue:o.transcript||'',placeholder:'Въведи текстовата транскрипция'}),
-              h(Button,{onClick:()=>{const el=document.getElementById('audioQueue-'+o.op_id);audioToText(o,el?el.value:'');}},'Запиши текста'),
+              voiceInputControls(o),
               CFG.stt_mode==='cloud'&&CFG.stt_cloud&&h(Button,{secondary:true,onClick:()=>retryAudio(o)},'Повтори STT')),
             h('div',{className:'bv-row'},
               ['pending','error','audio','review','voice_review','conflict','cancelled','local_error'].includes(o.state)&&h('button',{className:'bv-delete-op',onClick:()=>dropQueued(o)},icon('trash',15),' Изтрий от телефона'),
