@@ -1,3 +1,7 @@
+## v0.8.2.1 — WordPress-only icon refinement (not deployed)
+
+Replaces the custom install glyph from v0.8.2 (#40) with the official Google Material Icons Rounded `install_mobile` SVG (Apache-2.0); original geometry, navy/white/red colors, visible “Инсталирай”, existing compact bottom position. No external assets or changes to the install mechanism or IndexedDB. WordPress 0.8.2.1, JS `0.8.2.1-188c8b66fb21`; GAS remains 0.8.2, Cloudflare STT unchanged. If upgrading directly from an older backend, install GAS 0.8.2 first. No deployment, no merge. Actual mobile acceptance remains pending.
+
 ## v0.8.2 — integrated acceptance candidate (not deployed)
 
 Source branch `feature/v0.8.2-test-candidate`, based on v0.8.1; WordPress and Apps Script `0.8.2`, JS `0.8.2-39896a2667b4`. Cloudflare STT Worker unchanged (sar-bg-v1). No production changes or merge.
