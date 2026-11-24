@@ -23,6 +23,7 @@ async function run(){
   const sctx={syncingRef:{current:false},navigator:{onLine:true},CFG:{auth_mode:'public'},authRef:{current:null},
     DB:'user0',database:async(method,store,arg)=>{if(method==='getAll')return items.map(x=>({...x}));if(method==='put'){let idx=items.findIndex(x=>x.op_id===arg.op_id);items[idx]={...arg};return arg;}throw Error(method);},
     refreshQueue:async()=>true,loadDocument:async id=>reads.push(id),docRef:{current:{id:'current'}},
+    uuid:()=> 'test-lease',syncLease:async()=>true,requestBackgroundSync:()=>{},
     api:async(path,method,payload)=>{ops.push({path,id:payload.op_id});return {ok:true};},
     window:{setTimeout:()=>{}},setError:()=>{},setSyncError:()=>{},B:x=>x,Date,Math,console};
   vm.createContext(sctx);vm.runInContext(syncSource+'\nthis.syncAll=syncAll;',sctx);
