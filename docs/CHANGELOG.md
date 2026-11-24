@@ -1,3 +1,13 @@
+## v0.7.2 — Performance & Usability (draft candidate; NOT deployed)
+- #6: coalesce successful current-action LOG/INFO/media sync into one final Google document read per batch, preserving acknowledgments and idempotency.
+- #9: sticky top-bar queue button with count and attention indicator, public-mode access and pending-first modal; completed items available on demand.
+- #10: choose an incident calendar date (default today in Europe/Sofia); WordPress and Apps Script validate; name, INFO and LOG date follow choice without changing actual created/event timestamps.
+- #12: manual Google refresh available on all tabs; show last fresh timestamp; conservative 120s auto refresh when visible/online and not editing, recording, pending sync, or handling queue issues.
+- GAS document-read path no longer repairs image anchors as a side effect. Sorting old Sheet rows with embedded images requires explicit image-anchor maintenance or further test action; validate before production.
+- WordPress plugin and Apps Script update required together; Cloudflare Worker, STT, private settings and IndexedDB schema remain unchanged.
+- 19/29 local test files passed vs 17/27 v0.7.1 with identical historical failures; no end-to-end performance claim is made prior to deployment and measurement.
+- [Upgrade guide](UPGRADE_V072_BG.md) and [roadmap](ROADMAP.md).
+
 ## v0.7.1 — Reliability & INFO editing hotfix (operator-deployed 2026-11-24; end-to-end acceptance pending)
 - #2: orphan media cleanup uses one shared readwrite IndexedDB transaction over queue + media.
 - #3: local durable commit is independent of subsequent UI refresh; explicit audio retry preserves op_id.
