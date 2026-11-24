@@ -229,10 +229,16 @@ class BVLOG_API {
         $p = (array)$request->get_json_params();
         $type = sanitize_text_field($p['type'] ?? '');
         $place = sanitize_text_field($p['place'] ?? '');
+        $date_provided = array_key_exists('incident_date', $p);
+        $incident_date = $date_provided && is_string($p['incident_date']) ? trim($p['incident_date']) : '';
+        if ($date_provided && (!preg_match('/^\d{4}-\d{2}-\d{2}$/D', $incident_date) ||
+            !checkdate((int)substr($incident_date, 5, 2), (int)substr($incident_date, 8, 2), (int)substr($incident_date, 0, 4)))) {
+            return new WP_Error('bvlog_invalid_date', 'Invalid incident date (YYYY-MM-DD).', array('status' => 400));
+        }
         if (!$type || !$place || (function_exists('mb_strlen') ? mb_strlen($type) : strlen($type)) > 60 || (function_exists('mb_strlen') ? mb_strlen($place) : strlen($place)) > 100) {
             return new WP_Error('bvlog_invalid', 'Action type and location are required (max 60 / 100 characters).', array('status' => 400));
         }
-        return self::forward('create', array('type' => $type, 'place' => $place, 'create_id' => sanitize_text_field($p['create_id'] ?? '')));
+        return self::forward('create', array('type' => $type, 'place' => $place, 'incident_date' => $incident_date, 'create_id' => sanitize_text_field($p['create_id'] ?? '')));
     }
     public static function document($request) {
         return self::forward('read', array('doc_id' => sanitize_text_field($request['id'])));

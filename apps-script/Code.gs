@@ -1,5 +1,5 @@
 /**
- * BG Voice Logger - Google Apps Script bridge v0.7.0.
+ * BG Voice Logger - Google Apps Script bridge v0.7.2.
  * Deploy as Web App: Execute as Me, access Anyone. HTTPS access is protected
  * by a long random shared secret kept only in WordPress and Script Properties.
  * Never put this secret into browser JavaScript or a public spreadsheet.
@@ -50,7 +50,7 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.7.0'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.7.2'};
   }
   if (action === 'list') return bvlList_(folderId, templateId);
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id);
@@ -77,6 +77,21 @@ function bvlCell_(s) {
 function bvlDate_(d) { return Utilities.formatDate(d, BVL.TZ, 'dd.MM.yyyy'); }
 function bvlISODate_(d) { return Utilities.formatDate(d, BVL.TZ, 'yyyy.MM.dd'); }
 function bvlTime_(d) { return Utilities.formatDate(d, BVL.TZ, 'HH:mm'); }
+/** Validate a calendar-only incident date without timezone conversions. */
+function bvlIncidentDate_(raw) {
+  const input=String(raw===null||raw===undefined?'':raw);
+  if(input===''){
+    const now=new Date();
+    return {filename:bvlISODate_(now),display:bvlDate_(now)};
+  }
+  const match=/^(\d{4})-(\d{2})-(\d{2})$/.exec(input);
+  if(!match)throw new Error('Invalid incident date: expected YYYY-MM-DD.');
+  const year=Number(match[1]),month=Number(match[2]),day=Number(match[3]);
+  const d=new Date(Date.UTC(year,month-1,day));
+  if(d.getUTCFullYear()!==year||d.getUTCMonth()!==month-1||d.getUTCDate()!==day)
+    throw new Error('Invalid incident calendar day.');
+  return {filename:match[1]+'.'+match[2]+'.'+match[3],display:match[3]+'.'+match[2]+'.'+match[1]};
+}
 function bvlDoc_(folderId, templateId, docId) {
   if (!bvlValidId_(docId) || docId === templateId) throw new Error('Invalid operation document.');
   const file = DriveApp.getFileById(docId);
@@ -265,6 +280,7 @@ function bvlInfoAddRow_(ss,p) {
 function bvlCreate_(folderId, templateId, payload) {
   const folder = DriveApp.getFolderById(folderId);
   const requestId = String(payload.create_id || '');
+  const chosenDate=bvlIncidentDate_(payload.incident_date);
   const idempotentKey = /^[a-f0-9-]{32,50}$/i.test(requestId) ? 'BVLOG_CREATE_' + requestId : '';
   if (idempotentKey) {
     const existing = PropertiesService.getScriptProperties().getProperty(idempotentKey);
@@ -280,7 +296,7 @@ function bvlCreate_(folderId, templateId, payload) {
   if (!bvlTypeOptions_(templateId).includes(bvlCanonicalType_(type))) return {ok:false,code:'action_type',message:'Choose a valid action type from the current template.'};
   if (!place || /[\r\n\\/<>]/.test(place)) return {ok:false,code:'place',message:'Location is required; avoid path separators.'};
   const now = new Date();
-  const base = bvlISODate_(now) + ' - ' + BVL.DKA + ' - ' + bvlCanonicalType_(type) + ' - ' + place;
+  const base = chosenDate.filename + ' - ' + BVL.DKA + ' - ' + bvlCanonicalType_(type) + ' - ' + place;
   let name = base, suffix = 2;
   while (folder.getFilesByName(name).hasNext()) { name = base + ' (' + suffix++ + ')'; }
   const template = DriveApp.getFileById(templateId);
@@ -300,8 +316,8 @@ function bvlCreate_(folderId, templateId, payload) {
     // Location remains empty until an operator explicitly records actual GPS/location.
     const placeRow=first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u041b\u043e\u043a\u0430\u0446\u0438\u044f'));
     if(placeRow)info.getRange(placeRow.fields[0].col+placeRow.row).clearContent();
-    info.getRange(Math.max(1,first.headerRow-1),Math.min(3,info.getMaxColumns())).setValue(bvlDate_(now));
-    log.getRange('D2').setValue(BVL.DATE + ' ' + bvlDate_(now));
+    info.getRange(Math.max(1,first.headerRow-1),Math.min(3,info.getMaxColumns())).setValue(chosenDate.display);
+    log.getRange('D2').setValue(BVL.DATE + ' ' + chosenDate.display);
     bvlPrepare_(ss);
     SpreadsheetApp.flush();
     if (idempotentKey) PropertiesService.getScriptProperties().setProperty(idempotentKey,copy.getId());
@@ -501,8 +517,7 @@ function bvlRead_(folderId, templateId, docId) {
     const logEnd=bvlEnd_(log,2,2,6);
     logStart=Math.max(2,logEnd-119);
     lr=log.getRange(logStart,1,Math.max(1,logEnd-logStart+1),8).getDisplayValues();
-    // Repair only photos owned by the application, preserving manual changes.
-    bvlRepairPhotoAnchors_(log, ss.getSheetByName(BVL.PHOTOS));
+    // Reads must not change image anchors; any maintenance needs its own explicit write operation.
     photoRich=log.getRange(logStart,6,Math.max(1,logEnd-logStart+1),1).getRichTextValues();
   }
   const byLogId = {};

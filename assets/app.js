@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.1-3d2b0c59217f';
+  const BVLOG_RUNNING_BUILD = '0.7.2-c6f4de4c832a';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -292,6 +292,14 @@
     if(!previewBlob||previewBlob.size>350000)throw new Error('Неуспешно създаване на миниатюра.');
     return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg'};
   }
+  // Capture a calendar day in Sofia, not a UTC timestamp.
+  function sofiaTodayISO(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Sofia'});}
+  function isIncidentDate(value){
+    if(!/^\d{4}-\d{2}-\d{2}$/.test(String(value||'')))return false;
+    const [year,month,day]=value.split('-').map(Number);
+    const utc=new Date(Date.UTC(year,month-1,day));
+    return utc.getUTCFullYear()===year&&utc.getUTCMonth()===month-1&&utc.getUTCDate()===day;
+  }
   function App() {
     const [mode,setMode]=useState('choose');
     const [doc,setDoc]=useState(null);
@@ -303,6 +311,7 @@
     const [newType,setNewType]=useState(TYPES[2]);
     const [actionTypes,setActionTypes]=useState(TYPES);
     const [newPlace,setNewPlace]=useState('');
+    const [incidentDate,setIncidentDate]=useState(sofiaTodayISO);
     const [createId,setCreateId]=useState(uuid());
     const [selectedDoc,setSelectedDoc]=useState('');
     const docsRequestRef=useRef(0);
@@ -313,6 +322,7 @@
     const [loginChallenge,setLoginChallenge]=useState('');
     const [loginError,setLoginError]=useState('');
     const [queueOpen,setQueueOpen]=useState(false);
+    const [showCompletedQueue,setShowCompletedQueue]=useState(false);
     const [photos,setPhotos]=useState([]);
     const [photoBusy,setPhotoBusy]=useState(false);
     const [gpsBusy,setGpsBusy]=useState(false);
@@ -335,6 +345,7 @@
     const [unsavedAudio,setUnsavedAudio]=useState(null);
     const [docLoading,setDocLoading]=useState(false);
     const [docLoadError,setDocLoadError]=useState('');
+    const [lastFreshAt,setLastFreshAt]=useState('');
     const documentRequestRef=useRef(0);
     const [draft,setDraft]=useState('');
     const [liveText,setLiveText]=useState('');
@@ -627,6 +638,7 @@
         if(!r.ok)throw new Error(r.message||'Document read failed');
         if(request!==documentRequestRef.current)return;
         setData(r.data);
+        setLastFreshAt(new Date().toISOString());
         try{await database('put','snapshots',{id,data:r.data,updated:new Date().toISOString()});}
         catch(localError){setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
@@ -639,16 +651,17 @@
     async function startSession(chosen) {
       if (!chosen || !checkOperatorName()) return;
       setDoc(chosen); docRef.current=chosen;
-      setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);
+      setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
       localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));
       await loadDocument(chosen.id);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
     }
     async function newDocument() {
       if (!newPlace.trim() || !checkOperatorName()) return;
+      if(!isIncidentDate(incidentDate)){setError('Избери валидна дата на акцията.');return;}
       setBusy(true);setError('');
       try {
-        const r=await api('documents','POST',{type:newType,place:newPlace.trim(),create_id:createId});
+        const r=await api('documents','POST',{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:createId});
         if (!r.ok) throw new Error(r.message||'Create failed');
         await loadDocs();
         setSelectedDoc(r.document.id);
@@ -772,7 +785,7 @@
       syncingRef.current=true;
       try {
         const items=(await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
-        let touched=false;
+        let touchedCurrent=false;
         for(const o of items){
           if(DB!==scope)return;
           if(!['pending','sending'].includes(o.state)||o.kind==='audio')continue;
@@ -841,7 +854,7 @@
             if(r.ok){
               work.state='synced';work.error='';work.url=r.url||'';
               delete work.blob;delete work.preview_blob;delete work.next_retry;
-              touched=true;
+              if(docRef.current&&o.doc_id===docRef.current.id)touchedCurrent=true;
             }else if(['waiting_for_log','busy','incomplete_upload'].includes(r.code)){
               work.state='pending';work.error=r.message||'Изчаква се потвърждение.';
               work.attempts=(work.attempts||0)+1;
@@ -863,13 +876,10 @@
           try{await database('put','queue',work);}
           catch(localError){setError('Локална база: '+localError.message);break;}
           o.state=work.state;
-          if(work.state==='synced' && o.kind==='log' && docRef.current&&docRef.current.id===o.doc_id){
-            await refreshQueue();
-            await loadDocument(o.doc_id);
-          }
         }
         await refreshQueue();
-        if(touched && docRef.current && DB===scope)await loadDocument(docRef.current.id);
+        // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
+        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
@@ -899,7 +909,27 @@
       return ()=>{window.removeEventListener('online',connection);window.removeEventListener('offline',connection);document.removeEventListener('visibilitychange',visibility);clearInterval(timer);};
     },[]);
 
-    function closeSession() { if(recording)return;documentRequestRef.current++;setDocLoading(false);setDocLoadError('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    // Keep the timer stable across queue state changes and UI re-renders.
+    // A fresh guard snapshot prevents a 45s queue refresh from endlessly postponing polling.
+    refreshRef.current={id:doc&&doc.id,ready:mode==='session'&&online&&!docLoading&&
+      !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
+      !unsavedAudio&&!draft.trim()&&!photos.length&&!queueOpen&&!gallery&&!logSaving&&
+      !rowSaving&&!photoBusy&&
+      !queue.some(o=>doc&&o.doc_id===doc.id&&!['synced','cancelled'].includes(o.state)),
+      load:loadDocument};
+    useEffect(()=>{
+      if(mode!=='session'||!doc||!online)return;
+      const id=doc.id;
+      const timer=window.setInterval(()=>{
+        const fresh=refreshRef.current;
+        if(document.hidden||!navigator.onLine||syncingRef.current||
+           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id)return;
+        fresh.load(id);
+      },120000);
+      return()=>window.clearInterval(timer);
+    },[mode,doc&&doc.id,online]);
+
+    function closeSession() { if(recording)return;documentRequestRef.current++;setDocLoading(false);setDocLoadError('');setLastFreshAt('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
@@ -1500,6 +1530,14 @@
     }
     const waiting=queue.filter(o=>o.state!=='synced'&&o.state!=='cancelled').length;
     const localSaveFailed=!!unsavedAudio;
+    const queueAccessible=!!auth||CFG.auth_mode==='public';
+    const requiresReview=o=>['conflict','review','voice_review','error','local_error'].includes(o.state)||
+      (o.state==='audio'&&((o.stt_attempts||0)>=4||!!o.stt_error));
+    const needsReview=queue.filter(requiresReview).length+(localSaveFailed?1:0);
+    const completedCount=queue.filter(o=>o.state==='synced'||o.state==='cancelled').length;
+    const displayedQueue=queue.filter(o=>showCompletedQueue||!['synced','cancelled'].includes(o.state))
+      .slice().sort((a,b)=>Number(requiresReview(b))-Number(requiresReview(a))
+        || String(b.created||'').localeCompare(String(a.created||'')));
     const myQueue=queue.filter(o=>!doc||o.doc_id===doc.id).slice().reverse();
     const logs=data&&data.LOG||[];
     const title=doc&&doc.name||'Документ за координация на акция';
@@ -1518,7 +1556,12 @@
             h('small',{className:'bv-build-id',title:'Running JavaScript build (not the HTML-configured version)'},
               'WP '+(CFG.plugin_version||'?')+' / JS '+BVLOG_RUNNING_BUILD))),
         h('div',{className:'bv-top-controls'},
-          auth&&h('button',{className:'bv-queue-toggle',onClick:()=>setQueueOpen(true),title:'Виж локалната опашка'},icon('clock',16),' ',waiting),
+          queueAccessible&&h('button',{type:'button',className:'bv-queue-toggle'+(needsReview?' has-alert':''),
+            onClick:()=>{setShowCompletedQueue(false);setQueueOpen(true);},
+            title:needsReview?needsReview+' операции изискват проверка':'Виж локалната опашка',
+            'aria-label':'Опашка: '+waiting+' чакащи, '+needsReview+' за проверка'},
+            icon(needsReview?'alert':'clock',17),h('span',{className:'bv-queue-label'},'Опашка'),
+            h('span',{className:'bv-queue-count'},waiting)),
           auth&&auth.kind==='google'&&h('button',{className:'bv-logout-top',onClick:googleLogout,title:'Изход от Google сесията'},icon('logout',16)),
           h('div',{className:'bv-connect '+(online?'connected':'disconnected')},icon(online?'cloud':'offline',17),online?B('Onlayn'):B('Oflayn')))),
       error&&h('div',{className:'bv-banner error'},icon('alert',18),h('span',null,error),h('button',{onClick:()=>setError(''),'aria-label':'Close'},icon('close',16))),
@@ -1558,22 +1601,31 @@
           h(Button,{disabled:!selectedDoc,onClick:()=>startSession(docs.find(d=>d.id===selectedDoc))},icon('arrow',18),' ',B('Otvori aktsiyata'))),
         h('div',{className:'bv-or'},B('ILI')),
         h('div',{className:'bv-card'},
-          h('button',{className:'bv-row spread bv-switch',onClick:()=>setCreating(!creating)},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
+          h('button',{className:'bv-row spread bv-switch',onClick:()=>{if(!creating)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
           creating&&h('div',{className:'bv-form'},
             h('label',null,B('Tip aktsiya'),h('select',{value:newType,onChange:e=>{setNewType(e.target.value);setCreateId(uuid());},className:'bv-input'},actionTypes.map(v=>h('option',{key:v,value:v},v)))),
             h('label',null,B('Naseleno myasto'),h('input',{className:'bv-input',value:newPlace,maxLength:100,placeholder:B('napr. gr. Samokov'),onChange:e=>{setNewPlace(e.target.value);setCreateId(uuid());}})),
-            h('div',{className:'bv-preview'},B('Ime na dokumenta')+': ',new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Sofia'}).replaceAll('-','.'),' - ',B('DKA'),' - ',newType,' - ',newPlace||'...'),
-            h(Button,{disabled:busy||!newPlace.trim()||!online,onClick:newDocument},busy?B('Sqzdava se...'):B('Sqzday i otvori')))),
+            h('label',null,'Дата на акцията',h('input',{className:'bv-input',type:'date',value:incidentDate,
+              onChange:e=>{setIncidentDate(e.target.value);setCreateId(uuid());},required:true})),
+            h('div',{className:'bv-preview'},B('Ime na dokumenta')+': ',(incidentDate||'YYYY-MM-DD').replaceAll('-','.'),' - ',B('DKA'),' - ',newType,' - ',newPlace||'...'),
+            h(Button,{disabled:busy||!newPlace.trim()||!isIncidentDate(incidentDate)||!online,onClick:newDocument},busy?B('Sqzdava se...'):B('Sqzday i otvori')))),
         !online&&h('div',{className:'bv-card bv-offline-last'},h('p',null,B('Oflayn: mozhe da prodqlzhish poslednata aktsiya.')),
           h(Button,{secondary:true,onClick:()=>{try{const d=JSON.parse(localStorage.getItem(localCacheKey('last-doc'))||'null');if(d)startSession(d);}catch(e){}}},B('Posledna aktsiya'))),
-        h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж')
+        queueAccessible&&h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж')
       ) : h('main',{className:'bv-content bv-session'},
         h('div',{className:'bv-action-top'},
           h('div',null,h('span',{className:'bv-kicker'},B('AKTIVNA AKTSIYA')),h('h1',null,title),
             doc&&doc.id&&h('a',{className:'bv-sheet-link',target:'_blank',rel:'noopener noreferrer',
               href:doc.url||('https://docs.google.com/spreadsheets/d/'+encodeURIComponent(doc.id)+'/edit')},
               icon('list',16),' ',B('Otvori tablitsata'))),
-          h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20))),
+          h('div',{className:'bv-action-buttons'},
+            h('div',{className:'bv-fresh-label',role:'status'},
+              !online?'Офлайн копие':docLoadError?'Обновяването е неуспешно':
+              docLoading?'Обновяване...':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
+              h('small',null,'Автоматично: на 2 мин. при безопасни условия')),
+            h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
+              title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
+            h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
         h('nav',{className:'bv-tabs','aria-label':'Tabs'},[
           ['LOG','list',B('Zhurnal')],['INFO','info',B('Info')],['TECH','truck',B('Tehnika')],['TEAM','users',B('Ekip')]
         ].map(x=>h('button',{key:x[0],className:page===x[0]?'selected':'',onClick:()=>{if(!recording){setPage(x[0]);setEditing(null);}}},icon(x[1],19),h('span',null,x[2])))),
@@ -1778,14 +1830,19 @@
             gallery.photos[gallery.index].id&&h(Button,{secondary:true,onClick:loadFullPhoto,disabled:galleryBusy},'Виж оригинала'),
             gallery.photos[gallery.index].url&&h('a',{href:gallery.photos[gallery.index].url,target:'_blank',rel:'noopener noreferrer'},'Отвори в Google Drive'),
             h(Button,{secondary:true,onClick:closeGallery},'Затвори')))),
-      queueOpen&&auth&&h('div',{className:'bv-modal-backdrop',onClick:()=>setQueueOpen(false)},
+      queueOpen&&queueAccessible&&h('div',{className:'bv-modal-backdrop',onClick:()=>setQueueOpen(false)},
         h('div',{className:'bv-modal bv-queue-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true'},
           h('div',{className:'bv-row spread'},h('h3',null,'Локална опашка — '+waiting+' чакащи'),
             h('button',{className:'bv-icon-btn',onClick:()=>setQueueOpen(false)},icon('close',20))),
           h('p',{className:'bv-muted'},'Всеки запис е свързан с конкретен документ. Синхронизираните записи не могат да се изтрият оттук.'),
           CFG.auth_mode==='google'&&h('button',{className:'bv-retry-op',onClick:importLegacyQueue},'Импорт на стари записи от v0.2.2'),
-          queue.length===0&&h('p',null,'Няма локални операции.'),
-          queue.slice().reverse().map(o=>h('div',{className:'bv-queue-card',key:o.op_id},
+          localSaveFailed&&h('div',{className:'bv-unsaved-audio',role:'alert'},
+            h('strong',null,'Има незапазено аудио!'),
+            h('button',{type:'button',onClick:()=>downloadBlob(unsavedAudio.blob,unsavedAudio.when)},'Изтегли резервно копие'),
+            h('button',{type:'button',onClick:retryUnsavedAudio},'Повтори запазването')),
+          needsReview>0&&h('p',{className:'bv-queue-review-count'},needsReview+' записи изискват проверка'),
+          displayedQueue.length===0&&h('p',null,'Няма чакащи операции.'),
+          displayedQueue.map(o=>h('div',{className:'bv-queue-card',key:o.op_id},
             h('div',{className:'bv-row spread'},h('strong',null,queueTarget(o)),h(EntryStatus,{status:o.state})),
             h('small',null,(o.kind==='field'?o.sheet+' '+o.col+o.row:o.kind==='photo'?'Снимка':o.kind==='audio'?'Аудиозапис':o.kind==='audio_upload'?'Оригинално аудио':o.kind==='log_change'?'Промяна на събитие':o.kind==='log'?'Събитие':o.kind)+' · '+timeOf(o.event_at||o.created)),
             h('p',null,o.kind==='photo'?(o.filename||'Снимка'):o.kind==='audio'?(o.state==='review'||o.state==='voice_review'?(o.transcript||'Провери транскрипцията'):'Аудиофайл'):o.kind==='audio_upload'?'Качва оригиналния запис':(o.text||o.value||o.error||'')),
@@ -1807,6 +1864,8 @@
               canDiscardInterruptedAudio(o)&&h('button',{className:'bv-delete-op',
                 onClick:()=>dropQueued(o)},'Изтрий прекъснатото аудио'),
               o.state==='error'&&h('button',{className:'bv-retry-op',onClick:async()=>{await database('put','queue',Object.assign({},o,{state:'pending'}));await refreshQueue();syncAll();}},'Опитай отново')))),
+          completedCount>0&&h('button',{className:'bv-retry-op',onClick:()=>setShowCompletedQueue(v=>!v)},
+            showCompletedQueue?'Скрий приключените':'Покажи приключените ('+completedCount+')'),
           h(Button,{secondary:true,onClick:()=>setQueueOpen(false)},'Затвори'))),
       logEditor&&h('div',{className:'bv-modal-backdrop',onClick:()=>setLogEditor(null)},
         h('div',{className:'bv-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Редакция на LOG събитие'},

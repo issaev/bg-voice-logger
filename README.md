@@ -1,10 +1,10 @@
-# BG Voice Logger — public source v0.7.1
+# BG Voice Logger — v0.7.2 source candidate (not deployed)
 
 Bulgarian voice-based operational log for rescue coordination. Components:
 WordPress PHP plugin, browser React/PWA frontend, Google Apps Script
 Sheets/Drive backend, Cloudflare Worker speech-to-text gateway, tests and docs.
 
-**Public-source safety note:** This repository contains the v0.7.1 code merged via [PR #13](https://github.com/issaev/bg-voice-logger/pull/13) on 2026-11-24. The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
+**Public-source safety note:** This branch develops v0.7.2 on top of the v0.7.1 source merged by [PR #13](https://github.com/issaev/bg-voice-logger/pull/13). **The operator-reported production site remains v0.7.1; v0.7.2 has not been deployed.** The public source is **not byte-for-byte identical to the privately configured WordPress production package**.
 Operational Google Drive folder IDs and template spreadsheet IDs have been
 removed from source code and historical docs. No real secrets are included.
 The operator reports WordPress v0.7.1 deployed in production. Merging PR #13 updated GitHub only and did not deploy or modify the website or deployed Apps Script.
@@ -41,9 +41,9 @@ playback duration. The referenced `benchmark.py` runner was not supplied.
 
 ### Project status
 
-**Source control:** `main` is aligned to the v0.7.1 source after PR #13 was merged. **Production:** the operator reported v0.7.1 / JS build `0.7.1-3d2b0c59217f` deployed on 2026-11-24; read-only public-response and 8/8 isolated regression checks passed. Real iPhone/Safari, Google Sheets/Drive and cross-device end-to-end acceptance is still pending; the deployed Apps Script revision has not been verified.
+**Development candidate:** v0.7.2 / JS build `0.7.2-c6f4de4c832a`. The operator-reported live installation is v0.7.1; there is no v0.7.2 deployment. New features: #6 coalesced LOG refresh, #9 sticky queue, #10 incident date picker, #12 conservative 120-second external Google Sheets revalidation plus manual refresh on all tabs. Google Apps Script reads no longer mutate photo anchors. Cloudflare STT and IndexedDB schema 2 remain unchanged.
 
-Keep P1 acceptance issues open until full tests. The v0.7.1 release requires coordinated WordPress and Apps Script changes; it does not change Cloudflare STT or IndexedDB schema. See [v0.7.1 upgrade guide](docs/UPGRADE_V071_BG.md). Future deployments still require explicit approval, backups and queue-preserving rollback.
+**Tests:** 19/29 test files pass versus 17/27 in v0.7.1, with the same 10 historical failures; test-incident, real iPhone and Google Sheets/Drive acceptance are pending. See [v0.7.2 upgrade / rollback guide](docs/UPGRADE_V072_BG.md). Do not merge or deploy without review and explicit release approval.
 
 ### License
 
