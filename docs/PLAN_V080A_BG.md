@@ -18,6 +18,12 @@
 - `node tests/test-v080a-analyze.js`: synthetic log aggregation, incomplete/failed requests, output redaction and no p95 from n=2.
 - Existing v0.7.2.1 GAS, bridge, media/voice, calendar and WordPress tests remain available. Real Google API and iPhone/Sheets acceptance still missing.
 
+## Ready-to-run staging-only benchmark — no deployment
+
+A dedicated, opt-in runner is available in [`apps-script/STAGING_READ_BENCHMARK.gs`](../apps-script/STAGING_READ_BENCHMARK.gs), with [`tools/compare-staging-reads.mjs`](../tools/compare-staging-reads.mjs) for comparing versions. Both have isolated regression tests. The driver blocks any document whose name does not start with `BVLOG_BENCHMARK_`, validates strict staging Script Properties, and invokes only the read path after the folder membership check. Run it from the Apps Script editor in separate staging projects, not against the production deployment. It measures GAS+serialization only; WordPress/redirect times require independent staging checks. See [full Bulgarian protocol](STAGING_TEST_V080A_BG.md).
+
+**Real measurement remains outstanding:** a test Sheet was located through Drive metadata, but the next Drive request returned HTTP 429. No real Apps Script staging execution has occurred, and the synthetic 97.4% reduction in scanned rows is **not** an observed latency gain. Test suite now **27/37 PASS vs 23/33 baseline**, with unchanged ten historical failures.
+
 ## How to measure on an approved, dedicated test incident
 
 1. **Do not deploy to production before explicit approval.** Keep the current published Apps Script deployment ID/URL and WordPress 0.7.2.1 untouched. If approved, use a separate Google Apps Script staging deployment with test folder/template and **non-sensitive test incident**; never connect a real SAR incident without authorization.
