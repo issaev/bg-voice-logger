@@ -1,6 +1,6 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status:** v0.7.1 is operator-reported production; v0.7.2 and v0.8.0 remain proposed. Acceptance of v0.7.1 is not complete.
+> **Status:** v0.7.1 is operator-reported production. v0.7.2 is implemented as a review candidate in `feature/v0.7.2-performance-usability` (NOT deployed); v0.8.0 remains proposed. Full v0.7.1 acceptance is not complete.
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
@@ -57,6 +57,10 @@ The report was obtained without modifying production code, data, caches or queue
 **Evidence level:** #2–#5 were reproduced using isolated Node functions/mocked dependencies; #8 and #11 have user reports with identifiable problematic UI code paths. User feedback says iPhone v0.7.0 works well in practice; preserve that behavior and keep Safari/IndexedDB **regression** testing rather than assuming active failure. This is **not** evidence that production data was already lost. See the issue descriptions for reproduction and acceptance criteria.
 
 ### v0.7.2 — performance and usability work (some changes require coordinated GAS deployment)
+
+**Candidate implementation (2026-11-24):** #6, #9, #10 and #12 have code + isolated tests on a feature branch. This is **not** production acceptance and does not close Issues. QA gates: test date creation against the real Apps Script, verify 120s refresh doesn't conflict with manual edits, test sticky queue on iPhone, and test photo anchors after manual sort because read-side auto-repair was deliberately removed. Browser before/after latency metrics and iPhone regression tests are still missing. See [v0.7.2 upgrade guide](UPGRADE_V072_BG.md).
+
+
 
 - [ ] **[#6 / AUDIT-05] Deduplicate LOG refreshes.** Existing flow calls refresh for every successful LOG and once more after a touched batch (N+1 full reads). Coalesce to **one** final refresh for the active incident while retaining per-operation ack/conflict and stale-response guards.
 - [ ] **[#9 / UX-01] One-click queue and review from the header.** Make an always discoverable top/sticky queue button, prioritize failed/conflicted/voice-review items, and keep local-only access consistent in supported auth modes. Avoid forcing users to scroll through hundreds of LOG events. Coordinate unsaved-audio warning with #5.
