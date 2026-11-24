@@ -281,3 +281,10 @@
   #bvlog-root .bv-brand-icon {min-width:32px;min-height:32px;}
   #bvlog-root .bv-brand-icon img {width:30px;height:30px;}
 }
+
+/* A voice LOG entry keeps one visible row through recognition, approval and sync. */
+#bvlog-root .bv-events .bv-local-event{background:#fff9ee;}
+#bvlog-root .bv-events .bv-local-event .bv-status{display:flex;margin-top:6px;}
+#bvlog-root .bv-inline-voice-review{display:grid;gap:8px;max-width:min(100%,580px);margin-top:9px;}
+#bvlog-root .bv-inline-voice-review .bv-textarea{width:100%;min-height:70px;box-sizing:border-box;}
+#bvlog-root .bv-inline-voice-review .bv-btn{justify-self:start;}
