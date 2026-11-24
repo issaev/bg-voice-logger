@@ -24,10 +24,26 @@ const BVL = {
   ]
 };
 
+// Emit only a short random request identifier, a fixed action name, phase and
+// elapsed time. Never log payloads, document IDs, names, secrets or transcripts.
+function bvlTrace_(requestId, action, stage, started) {
+  const rid=/^[a-f0-9]{12}$/.test(String(requestId||'')) ? String(requestId) : 'untracked';
+  const act=['read','list','operation','create','audio_read','photo_read','ping'].includes(action)
+    ? action : 'other';
+  try { console.log(JSON.stringify({request_id:rid,action:act,stage:stage,
+    elapsed_ms:Math.max(0,Date.now()-started)})); } catch(ignore) {}
+}
+
 function doPost(e) {
+  const start=Date.now();
+  let traceId='', traceAction='other';
+
   let result;
   try {
     const req = JSON.parse(e && e.postData && e.postData.contents || '{}');
+    traceId=String(req.request_id||'');
+    traceAction=String(req.action||'');
+    bvlTrace_(traceId,traceAction,'received',start);
     const expected = PropertiesService.getScriptProperties().getProperty('BVLOG_SHARED_SECRET');
     if (!expected || expected.length < 24 || !req.secret || req.secret !== expected) {
       result = {ok: false, code: 'unauthorized', message: 'Invalid bridge credential.'};
@@ -36,6 +52,8 @@ function doPost(e) {
     }
   } catch (err) {
     result = {ok: false, code: 'script_error', message: String(err && err.message || err).slice(0, 250)};
+  } finally {
+    bvlTrace_(traceId,traceAction,result&&result.ok===false?'completed_error':'completed',start);
   }
   return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
 }
@@ -53,7 +71,7 @@ function bvlDispatch_(request) {
     return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.7.2'};
   }
   if (action === 'list') return bvlList_(folderId, templateId);
-  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id);
+  if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
   if (action === 'photo_read') return bvlPhotoRead_(folderId, templateId, payload);
   if (action === 'audio_read') return bvlAudioRead_(folderId, templateId, payload);
   if (action === 'create' || action === 'operation') {
@@ -503,8 +521,12 @@ function bvlAddRow_(ss, p) {
   sheet.getRange(next,1,1,count+2).setValues([[next-2].concat(entries,[String(p.op_id)])]);
   return {ok:true,row:next};
 }
-function bvlRead_(folderId, templateId, docId) {
+function bvlRead_(folderId, templateId, docId, requestId) {
+  const traceStart=Date.now();
+  const phase=name=>bvlTrace_(requestId,'read',name,traceStart);
+  phase('read_start');
   const ss = bvlDoc_(folderId,templateId,docId);
+  phase('document_opened');
   const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
   const team = ss.getSheetByName('TEAM'), tech = ss.getSheetByName('TECH');
   const data = {};
@@ -512,6 +534,7 @@ function bvlRead_(folderId, templateId, docId) {
   const infoSections=bvlInfoSections_(info);
   data.INFO_SECTIONS=infoSections;
   data.INFO=info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[];
+  phase('info_loaded');
   let logStart=2,lr=[],photoRich=[];
   if(log){
     const logEnd=bvlEnd_(log,2,2,6);
@@ -520,6 +543,7 @@ function bvlRead_(folderId, templateId, docId) {
     // Reads must not change image anchors; any maintenance needs its own explicit write operation.
     photoRich=log.getRange(logStart,6,Math.max(1,logEnd-logStart+1),1).getRichTextValues();
   }
+  phase('log_loaded');
   const byLogId = {};
   const gallery = ss.getSheetByName(BVL.PHOTOS);
   if (gallery && gallery.getLastRow() >= 2) {
@@ -532,6 +556,7 @@ function bvlRead_(folderId, templateId, docId) {
       byLogId[logId].push({id:mediaId, text:record[5] || 'Снимка', url:'', managed:true});
     });
   }
+  phase('photos_loaded');
   const byAudio = {}, byFieldAudio = {};
   const audioIndex = ss.getSheetByName(BVL.AUDIOS);
   if (audioIndex && audioIndex.getLastRow() >= 2) {
@@ -545,6 +570,7 @@ function bvlRead_(folderId, templateId, docId) {
     });
   }
   data.FIELD_AUDIO=byFieldAudio;
+  phase('audio_index_loaded');
   const byHistory = {};
   const audit = ss.getSheetByName(BVL.HISTORY);
   if (audit && audit.getLastRow() >= 2) {
@@ -555,6 +581,7 @@ function bvlRead_(folderId, templateId, docId) {
       byHistory[key].push({at:String(r[3]||''),author:String(r[4]||''),action:String(r[2]||''),before:String(r[5]||''),after:String(r[6]||'')});
     });
   }
+  phase('history_loaded');
   data.LOG = lr.map((v,i) => {
     // Old v0.4.x hyperlinks continue to display without making files public.
     const legacy = photoRich[i] && photoRich[i][0] ? photoRich[i][0].getRuns()
@@ -576,7 +603,10 @@ function bvlRead_(folderId, templateId, docId) {
     })).filter(x=>x.row===2||x.cells.slice(1,name==='TEAM'?8:5).some(Boolean));
   }
 
-  return {ok:true,id:docId,name:DriveApp.getFileById(docId).getName(),url:ss.getUrl(),data:data};
+  phase('team_tech_loaded');
+  const result={ok:true,id:docId,name:DriveApp.getFileById(docId).getName(),url:ss.getUrl(),data:data};
+  phase('read_complete');
+  return result;
 }
 
 
