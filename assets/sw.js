@@ -297,7 +297,7 @@ async function bgDrain() {
         Object.assign(payload,{doc_id:original.doc_id,op_id:original.op_id,
           target_id:original.target_id,target_kind:original.target_kind,mime:original.mime,
           field_sheet:original.field_sheet,field_row:original.field_row,field_col:original.field_col,
-          part_index:part,part_count:total,base64:bgBase64(media.subarray(part*BV_BG_CHUNK,(part+1)*BV_BG_CHUNK))});
+          part_index:part,part_count:total,sequential:true,base64:bgBase64(media.subarray(part*BV_BG_CHUNK,(part+1)*BV_BG_CHUNK))});
       }
       // Login/logout can occur after a sync event was scheduled. Never replay
       // another operator's queue against the current signed-in session.
@@ -314,7 +314,8 @@ async function bgDrain() {
           original.kind==='audio_upload'?'audio':'operation',payload);
         if(result&&result.ok===true && original.kind==='audio_upload' && !result.complete){
           const total=payload.part_count;
-          work.parts_done=Math.min(total,payload.part_index+1);
+          const missing=Number.isInteger(result.next_part)&&result.next_part>=0&&result.next_part<total;
+          work.parts_done=payload.part_index===total-1&&missing?result.next_part:Math.min(total,payload.part_index+1);
           work.state='pending';work.error='';delete work.next_retry;
         }else if(result&&result.ok===true){
           if(original.kind==='audio_upload')work.parts_done=payload.part_index+1;

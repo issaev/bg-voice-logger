@@ -328,3 +328,9 @@
   #bvlog-root .bv-event-photos>button,#bvlog-root .bv-event-photos .bv-attach-inline{min-height:40px;max-width:100%;white-space:normal}
   #bvlog-root .bv-event-actions{box-sizing:border-box;max-width:100%}
 }
+
+/* v0.8.2 install affordance: distinct SKB-inspired blue/red/white app tile. */
+#bvlog-root .bv-install-footer .bv-install-btn{display:flex;flex-direction:column;gap:4px;min-height:64px;height:auto;width:auto;min-width:78px;background:transparent;border:0;padding:3px 6px;color:var(--bv-navy);font-size:12px}
+#bvlog-root .bv-install-glyph{display:flex;align-items:center;justify-content:center;width:42px;height:42px;background:var(--bv-navy);color:white;border-radius:11px;box-shadow:0 2px 5px rgba(15,53,91,.18);border:1px solid #1a4b75}
+#bvlog-root .bv-install-accent{stroke:#ff7474}
+#bvlog-root .bv-install-label{font-weight:700;line-height:1.2}

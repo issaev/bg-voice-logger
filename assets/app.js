@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.1-dcfac367badc';
+  const BVLOG_RUNNING_BUILD = '0.8.2-39896a2667b4';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -455,7 +455,9 @@
     const [mode,setMode]=useState('choose');
     const [doc,setDoc]=useState(null);
     const [page,setPage]=useState('LOG');
+    const pageRef=useRef('LOG'),viewRef=useRef({id:'',tab:'LOG',hasData:false});
     const [data,setData]=useState(null);
+    const [cachedView,setCachedView]=useState(false);
     const [docs,setDocs]=useState([]);
     const [docsLoading,setDocsLoading]=useState(false);
     const [creating,setCreating]=useState(false);
@@ -776,6 +778,9 @@
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
       docsRequestRef.current++;documentRequestRef.current++;docRef.current=null;createScopeRef.current++;
+      clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
+      documentReadInFlightRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};
+      setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
       createPendingRef.current=null;setPendingCreate(null);setCreating(false);
       selectedDocRef.current='';selectedDocManualRef.current=false;
       CFG.csrf='';setAuth(null);setMode('choose');setDoc(null);setData(null);setDocs([]);setSelectedDoc('');setQueueOpen(false);setQueue([]);
@@ -797,7 +802,12 @@
         ? 'bg-voice-logger-queue-v3-google-'+identity.sub
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
-        docsRequestRef.current++;
+        docsRequestRef.current++;documentRequestRef.current++;createScopeRef.current++;
+        clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
+        documentReadInFlightRef.current=null;docRef.current=null;
+        viewRef.current={id:'',tab:'LOG',hasData:false};pageRef.current='LOG';
+        setDoc(null);setMode('choose');setData(null);setPage('LOG');
+        setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
         selectedDocRef.current='';selectedDocManualRef.current=false;
         DB=newDB;dbPromise=null;
       }
@@ -940,56 +950,110 @@
         if(navigator.onLine&&!document.hidden)syncAll();
       },Math.max(250,Math.min(...dates)-Date.now()));
     }
-    async function loadDocument(id,automaticRetry=false) {
-      // A manual refresh and the 120s poll must not launch the same read twice.
-      if(documentReadInFlightRef.current?.id===id)return false;
+    // Snapshot keys are tab-scoped in the same per-operator database. The old
+    // whole-document snapshot is a read-only compatibility fallback.
+    function tabSnapshotKey(id,tab){return id+':'+tab;}
+    function hasTabData(value,tab){
+      return !!value&&Array.isArray(value[tab]);
+    }
+    function resetView(id,tab){
+      viewRef.current={id,tab,hasData:false};
+      setData(null);setCachedView(false);setLastFreshAt('');setDocLoadError('');
+    }
+    async function loadDocument(id,automaticRetry=false,requestedTab,force=false) {
+      const tab=['LOG','INFO','TEAM','TECH'].includes(requestedTab)?requestedTab:pageRef.current;
+      const scope=DB;
+      if(id!==docRef.current?.id||tab!==pageRef.current)return false;
+      const previousFlight=documentReadInFlightRef.current;
+      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab)return false;
       if(!automaticRetry)clearReadRetry();
       const request=++documentRequestRef.current;
-      documentReadInFlightRef.current={id,request};
+      if(previousFlight?.controller)previousFlight.controller.abort();
+      const controller=typeof AbortController==='function'?new AbortController():null;
+      documentReadInFlightRef.current={id,tab,request,controller};
+      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id&&tab===pageRef.current;
+      const key=tabSnapshotKey(id,tab);
+      if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
       setDocLoading(true);setDocLoadError('');
+      async function showCached(){
+        try{
+          let snap=await database('get','snapshots',key);
+          if(!current())return false;
+          if(!snap||!hasTabData(snap.data,tab))snap=await database('get','snapshots',id);
+          if(!current()||!snap||!hasTabData(snap.data,tab))return false;
+          if(!viewRef.current.hasData){
+            setData(snap.data);setCachedView(true);
+            viewRef.current={id,tab,hasData:true};
+          }
+          return true;
+        }catch(ignore){return false;}
+      }
       try{
         if(!navigator.onLine){
-          const snap=await database('get','snapshots',id);
-          if(request!==documentRequestRef.current)return;
-          setData(snap?snap.data:null);
-          if(!snap)setDocLoadError('Няма офлайн копие на този документ. Свържи се с интернет.');
+          const found=await showCached();
+          if(current()){
+            setCachedView(true);
+            if(!found&&!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
+          }
           return;
         }
-        const r=await api('document/'+encodeURIComponent(id));
-        if(!r.ok)throw new Error(r.message||'Document read failed');
-        if(request!==documentRequestRef.current)return;
-        setData(r.data);
-        setLastFreshAt(new Date().toISOString());
-        readBackoffRef.current={id,attempts:0,nextAt:0};
-        clearReadRetry();
-        try{await database('put','snapshots',{id,data:r.data,updated:new Date().toISOString()});}
-        catch(localError){setNotice('Данните са заредени, но офлайн копието не е обновено.');}
+        // Paint an existing private snapshot quickly, but only live data can
+        // set the fresh timestamp. No private HTTP/Service Worker caching.
+        if(!viewRef.current.hasData)await showCached();
+        if(!current())return;
+        const separator=String(CFG.api||'').includes('?')?'&':'?';
+        const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab,'GET',undefined,controller?.signal);
+        if(!r.ok||r.id&&r.id!==id||!hasTabData(r.data,tab)||
+          (Array.isArray(r.loaded_tabs)&&!r.loaded_tabs.includes(tab)))
+          throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
+        if(!current())return;
+        const stamp=new Date().toISOString();
+        setData(r.data);setCachedView(false);setLastFreshAt(stamp);
+        viewRef.current={id,tab,hasData:true};
+        readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        try{await database('put','snapshots',{id:key,data:r.data,updated:stamp});}
+        catch(localError){if(current())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
-        if(request!==documentRequestRef.current)return;
-        try{const snap=await database('get','snapshots',id);if(snap)setData(snap.data);}
-        catch(ignore){}
+        if(!current())return;
+        if(!viewRef.current.hasData)await showCached();
+        if(!current())return;
         const scheduled=scheduleReadRetry(id,e,automaticRetry);
-        setDocLoadError('Документът не е обновен: '+(e.message||'Неуспешно обновяване.')+
-          (lastFreshAt?' Показани са последните потвърдени данни от '+timeOf(lastFreshAt)+'.':'')+
+        setDocLoadError('Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
+          (viewRef.current.hasData?' Показани са последните налични данни.':'')+
           (scheduled?' Автоматичен повторен опит е планиран.':''));
         const previous=readBackoffRef.current;
         const attempts=(previous.id===id?previous.attempts:0)+1;
-        readBackoffRef.current={id,attempts,
-          nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
       }finally{
         if(documentReadInFlightRef.current?.request===request)documentReadInFlightRef.current=null;
-        if(request===documentRequestRef.current)setDocLoading(false);
+        if(current())setDocLoading(false);
       }
     }
-    async function startSession(chosen) {
-      if (!chosen || !checkOperatorName()) return;
-      clearReadRetry();
-      setDoc(chosen); docRef.current=chosen;
+    async function startSession(chosen,bootstrap) {
+      if(!chosen||!checkOperatorName())return;
+      clearReadRetry();documentRequestRef.current++;
+      documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;
+      setDoc(chosen);docRef.current=chosen;pageRef.current='LOG';
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
-      setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
+      setPage('LOG');setMode('session');resetView(chosen.id,'LOG');setError('');setSecondInfo(false);
       try{localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));}catch(ignore){}
-      await loadDocument(chosen.id);
-      if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
+      if(bootstrap&&bootstrap.id===chosen.id&&Array.isArray(bootstrap.loaded_tabs)&&
+        bootstrap.loaded_tabs.includes('LOG')&&hasTabData(bootstrap.data,'LOG')){
+        const stamp=new Date().toISOString();
+        setData(bootstrap.data);setCachedView(false);setLastFreshAt(stamp);setDocLoading(false);
+        viewRef.current={id:chosen.id,tab:'LOG',hasData:true};
+        try{await database('put','snapshots',{id:tabSnapshotKey(chosen.id,'LOG'),data:bootstrap.data,updated:stamp});}
+        catch(ignore){}
+      }else await loadDocument(chosen.id,false,'LOG');
+      if(navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+    }
+    function switchTab(tab){
+      if(!docRef.current||tab===pageRef.current||recording||fieldRecording||logSaving||rowSaving)return;
+      if(editing||logEditor||rowAdd||infoAdding>=0){
+        setError('Запази или откажи текущата редакция, преди да смениш раздела.');return;
+      }
+      clearReadRetry();pageRef.current=tab;setPage(tab);resetView(docRef.current.id,tab);
+      loadDocument(docRef.current.id,false,tab);
     }
     async function newDocument() {
       if(createFlightRef.current||!checkOperatorName())return;
@@ -1004,7 +1068,7 @@
       createPendingRef.current=payload;setPendingCreate(payload);
       createFlightRef.current=true;setBusy(true);setError('');
       try{
-        const r=await api('documents','POST',payload);
+        const r=await api('documents','POST',Object.assign({},payload,{bootstrap:true}));
         if(!r.ok){
           if(['action_type','place','invalid_date','create_id','configuration'].includes(r.code))clearPendingCreate(key,payload.create_id);
           throw new Error(r.message||'Create failed');
@@ -1023,7 +1087,7 @@
         selectExistingDocument(r.document.id);setCreating(false);
         // The LOG shell becomes usable immediately after acknowledged creation;
         // its existing full READ populates actual server values without blocking LIST.
-        await startSession(r.document);
+        await startSession(r.document,r.bootstrap);
       }catch(e){
         if(['bvlog_invalid','bvlog_invalid_date'].includes(e.code))clearPendingCreate(key,payload.create_id);
         if(current())setError(e.message+(createPendingRef.current?' · Опитай отново със същата заявка; не създавай дубликат.':''));
@@ -1187,14 +1251,22 @@
                 const response=await api('audio','POST',{doc_id:o.doc_id,op_id:o.op_id,
                   target_id:o.target_id,target_kind:o.target_kind,mime:o.mime,
                   field_sheet:o.field_sheet,field_row:o.field_row,field_col:o.field_col,
-                  part_index:part,part_count:total,base64:await photoBase64(piece)});
+                  part_index:part,part_count:total,sequential:true,base64:await photoBase64(piece)});
                 if(DB!==scope)return;
-                if(!response.ok)throw new Error(response.message||'Неуспешно качване на аудиото.');
-                work.parts_done=part+1;
+                if(!response.ok){
+                  if(['busy','waiting_for_log','incomplete_upload'].includes(response.code)){r=response;break;}
+                  const failure=new Error(response.message||'Неуспешно качване на аудиото.');
+                  failure.retryable=false;failure.code=response.code;throw failure;
+                }
+                const missing=Number.isInteger(response.next_part)&&response.next_part>=0&&response.next_part<total;
+                // Legacy GAS may report its first missing piece after every chunk;
+                // only a non-complete final ACK may rewind this sequential client.
+                work.parts_done=part===total-1&&!response.complete&&missing?response.next_part:part+1;
                 await database('put','queue',work);
                 if(response.complete){completed=true;break;}
+                if(part===total-1&&!response.complete)break;
               }
-              r={ok:completed,code:completed?'':'incomplete_upload',
+              r=r||{ok:completed,code:completed?'':'incomplete_upload',
                 message:completed?'':'Аудиото още не е потвърдено в Google Drive.'};
             }else if(o.kind==='photo'){
               if(o.log_op_id){
@@ -1260,7 +1332,7 @@
         }
         await refreshQueue();
         // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
-        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id);
+        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id,false,undefined,true);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
@@ -1287,7 +1359,7 @@
             }
           }
         } catch(e) { /* ignore invalid cache */ }
-        refreshQueue();loadDocs();requestBackgroundSync();
+        restorePendingCreate();refreshQueue();loadDocs();requestBackgroundSync();
       }
       if ('serviceWorker' in navigator && CFG.sw_url && window.isSecureContext) {
         navigator.serviceWorker.register(CFG.sw_url,{updateViaCache:'none',scope:(()=>{const path=new URL(CFG.app_url,location.href).pathname;return path.endsWith('/')?path:path+'/';})()})
@@ -1341,7 +1413,7 @@
       return()=>window.clearInterval(timer);
     },[mode,doc&&doc.id,online]);
 
-    function closeSession() { if(recording)return;clearReadRetry();documentRequestRef.current++;setDocLoading(false);setDocLoadError('');setLastFreshAt('');closeAudioPlayer();setDoc(null);docRef.current=null;setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    function closeSession() { if(recording||fieldRecording)return;clearReadRetry();documentRequestRef.current++;documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;setDocLoading(false);setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
@@ -2107,7 +2179,12 @@
         !installedPwa&&h('section',{className:'bv-install-footer','aria-label':'Инсталиране на приложението'},
           h('button',{type:'button',className:'bv-install-btn',onClick:installOnPhone,
             'aria-label':'Инсталирай приложението на телефона',title:'Инсталирай приложението на телефона',
-            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},icon('download',20)),
+            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},
+            h('span',{className:'bv-install-glyph','aria-hidden':'true'},
+              h('svg',{width:28,height:28,viewBox:'0 0 32 32',fill:'none',stroke:'currentColor',strokeWidth:2.6,strokeLinecap:'round',strokeLinejoin:'round'},
+                h('path',{d:'M8 22L15 8M19 8L25 22M7 21H24M16 16V27'}),
+                h('path',{d:'M12 23L16 27L20 23',className:'bv-install-accent'}))),
+            h('span',{className:'bv-install-label'},'Инсталирай')),
           installStatus&&h('p',{className:'bv-install-status',role:'status'},installStatus),
           installHelpOpen&&h('div',{id:'bvlog-install-help',className:'bv-install-help',role:'region',
             'aria-label':'Инструкции за инсталиране'},
@@ -2126,14 +2203,15 @@
           h('div',{className:'bv-action-buttons'},
             h('div',{className:'bv-fresh-label',role:'status'},
               !online?'Офлайн копие':docLoadError?'Обновяването е неуспешно':
-              docLoading?'Обновяване...':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
-              h('small',null,'Автоматично: на 2 мин. при безопасни условия')),
+              docLoading?(cachedView?'Кеширани данни · обновяване...':'Обновяване...'):
+                cachedView?'Локално копие · не е обновено':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
+              h('small',null,page+' · автоматично: на 2 мин. при безопасни условия')),
             h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
               title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
             h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
         h('nav',{className:'bv-tabs','aria-label':'Tabs'},[
           ['LOG','list',B('Zhurnal')],['INFO','info',B('Info')],['TECH','truck',B('Tehnika')],['TEAM','users',B('Ekip')]
-        ].map(x=>h('button',{key:x[0],className:page===x[0]?'selected':'',onClick:()=>{if(!recording){setPage(x[0]);setEditing(null);}}},icon(x[1],19),h('span',null,x[2])))),
+        ].map(x=>h('button',{key:x[0],className:page===x[0]?'selected':'',onClick:()=>switchTab(x[0])},icon(x[1],19),h('span',null,x[2])))),
         data&&Array.isArray(data.MISSING_TABS)&&data.MISSING_TABS.length>0&&
           h('div',{className:'bv-banner error',role:'alert'},
             'Липсващи листове в Google Sheets: '+data.MISSING_TABS.join(', ')+
@@ -2275,7 +2353,7 @@
 
         ) : h('section',{className:'bv-form-screen'},
           h('div',{className:'bv-row spread'},h('h2',null,page==='TEAM'?B('Uchastnitsi'):B('Tehnika')),
-            h(Button,{secondary:true,onClick:()=>{setRowAdd(!rowAdd);setRowFields([]);}},icon('plus',17),' ',B('Nov red'))),
+            h(Button,{secondary:true,disabled:!rowAdd&&(!data||!Array.isArray(data[page])||(data.MISSING_TABS||[]).includes(page)),onClick:()=>{setRowAdd(!rowAdd);setRowFields([]);}},icon('plus',17),' ',B('Nov red'))),
           rowAdd&&h('div',{className:'bv-card bv-new-row'},
             (page==='TEAM'?['Dve imena','Telefon','Transport','Momentna lokatsiya','Predvaritelen chas','Realno pristigane','Priklyuchvane']:['Avtomobili i ekipirovka','Broi','Otgovornik','Informatsiya']).map((label,i)=>h('label',{key:i},B(label),h('input',{className:'bv-input',value:rowFields[i]||'',onChange:e=>setRowFields(old=>{const x=old.slice();x[i]=e.target.value;return x;})}))),
             h(Button,{disabled:rowSaving||!rowFields.some(v=>v&&v.trim()),onClick:async()=>{
