@@ -3,7 +3,7 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const raw=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
 const source=raw.replace('  function uuid() {',
-  '  window.__v062db={openDB,database,queueBlob,hasQueueMedia,writeQueueGroup};\n  function uuid() {')
+  '  window.__v062db={openDB,database,queueBlob,hasQueueMedia,writeQueueGroup,reclaimOrphanMedia};\n  function uuid() {')
   .replace('    const waiting=queue.filter(o=>o.state!==\'synced\'',
   '    window.__v062app={audioToText,preserveAudioChild,preserveAudioWithParent,saveAudioClip};\n    const waiting=queue.filter(o=>o.state!==\'synced\'');
 assert.ok(source.includes('window.__v062db')&&source.includes('window.__v062app'),'test entry points missing');
@@ -122,6 +122,25 @@ assert.ok(appFunctions&&dbFunctions,'app+DB not initialized');
   assert.ok(!photo.blob&&!photo.preview_blob&&photo.preview_blob_media_id&&photo.blob_media_id);
   assert.strictEqual((await dbFunctions.queueBlob(photo)).size,3);
   assert.strictEqual((await dbFunctions.queueBlob(photo,'preview_blob')).size,2);
+  // v0.7.1 orphan cleanup must lock BOTH stores so new references cannot race its scan.
+  const orphanId='v071-unreferenced-blob';
+  await dbFunctions.database('put','media',{
+    media_id:orphanId,bytes:new ArrayBuffer(2),mime:'image/jpeg',size:2});
+  const originalTransaction=db.transaction.bind(db),cleanupScopes=[];
+  db.transaction=(names,mode)=>{
+    if(mode==='readwrite')cleanupScopes.push(Array.isArray(names)?names.slice():[names]);
+    return originalTransaction(names,mode);
+  };
+  await dbFunctions.reclaimOrphanMedia();
+  assert.ok(cleanupScopes.some(v=>v.includes('queue')&&v.includes('media')),
+    'orphan cleanup must use a shared queue+media write lock');
+  assert.strictEqual(await dbFunctions.database('get','media',orphanId),undefined,
+    'unreferenced media must be reclaimed');
+  assert.ok(await dbFunctions.database('get','media',photo.blob_media_id),
+    'cleanup removed media still referenced by a queued photo');
+  assert.ok(await dbFunctions.database('get','media',photo.preview_blob_media_id),
+    'cleanup removed queued photo preview');
+  db.transaction=originalTransaction;
   // Readable records written by v0.6.1 (with a Blob directly in 'queue') remain usable.
   const legacyId='abababab-1234-4123-8123-123456789abc';
   await new Promise((resolve,reject)=>{

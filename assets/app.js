@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.0-5cabd2394a0e';
+  const BVLOG_RUNNING_BUILD = '0.7.1-3d2b0c59217f';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -168,16 +168,29 @@
   }
   async function reclaimOrphanMedia(){
     const db=await openDB();
-    const queue=await database('getAll','queue');
-    const referenced=new Set();
-    for(const op of queue)for(const field of MEDIA_FIELDS)if(op[field+'_media_id'])referenced.add(op[field+'_media_id']);
-    const allKeys=await database('getAllKeys','media');
-    const orphans=allKeys.filter(id=>!referenced.has(id));
-    if(!orphans.length)return;
-    await new Promise((resolve,reject)=>{
-      const tx=db.transaction('media','readwrite');
-      tx.oncomplete=resolve;tx.onabort=()=>reject(tx.error||new Error('Почистването е прекъснато.'));
-      for(const id of orphans)tx.objectStore('media').delete(id);
+    return new Promise((resolve,reject)=>{
+      // A single readwrite transaction serializes cleanup with queue+media writes.
+      const tx=db.transaction(['queue','media'],'readwrite');
+      const queueStore=tx.objectStore('queue'),mediaStore=tx.objectStore('media');
+      let removed=0;
+      tx.oncomplete=()=>resolve(removed);
+      tx.onabort=()=>reject(tx.error||new Error('Orphan cleanup transaction aborted.'));
+      tx.onerror=()=>{};
+      try {
+        const readQueue=queueStore.getAll();
+        readQueue.onsuccess=()=>{
+          const referenced=new Set();
+          for(const op of readQueue.result||[]){
+            for(const field of MEDIA_FIELDS)if(op[field+'_media_id'])referenced.add(op[field+'_media_id']);
+          }
+          const readKeys=mediaStore.getAllKeys();
+          readKeys.onsuccess=()=>{
+            for(const id of readKeys.result||[]){
+              if(!referenced.has(id)){mediaStore.delete(id);removed++;}
+            }
+          };
+        };
+      }catch(e){try{tx.abort();}catch(ignore){}reject(e);}
     });
   }
   function uuid() {
@@ -292,6 +305,7 @@
     const [newPlace,setNewPlace]=useState('');
     const [createId,setCreateId]=useState(uuid());
     const [selectedDoc,setSelectedDoc]=useState('');
+    const docsRequestRef=useRef(0);
     const [operatorName,setOperatorName]=useState(initialOperator());
     const [online,setOnline]=useState(navigator.onLine);
     const [auth,setAuth]=useState(null);
@@ -328,6 +342,7 @@
     const [editing,setEditing]=useState(null);
     const [editValue,setEditValue]=useState('');
     const [rowAdd,setRowAdd]=useState(false);
+    const [rowSaving,setRowSaving]=useState(false);
     const [rowFields,setRowFields]=useState([]);
     const [secondInfo,setSecondInfo]=useState(false);
     const [infoAdding,setInfoAdding]=useState(-1);
@@ -511,6 +526,7 @@
     async function googleLogout(){
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
+      docsRequestRef.current++;
       CFG.csrf='';setAuth(null);setMode('choose');setDoc(null);setData(null);setDocs([]);setSelectedDoc('');setQueueOpen(false);setQueue([]);
       try{localStorage.removeItem('bvlog-last-identity');}catch(e){}
       if(window.google && google.accounts && google.accounts.id) google.accounts.id.disableAutoSelect();
@@ -524,6 +540,7 @@
         ? 'bg-voice-logger-queue-v3-google-'+identity.sub
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
+        docsRequestRef.current++;
         DB=newDB;dbPromise=null;
       }
       try {
@@ -569,26 +586,31 @@
       return false;
     }
     async function refreshQueue() {
-      try { setQueue((await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''))); }
-      catch(e) { setError(B('Nedostqpno lokalno hranilishte: ')+e.message); }
+      try {
+        setQueue((await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||'')));
+        return true;
+      }catch(e){setError(B('Nedostqpno lokalno hranilishte: ')+e.message);return false;}
     }
     async function loadDocs() {
       if(CFG.auth_mode!=='public' && !authRef.current)return;
+      const request=++docsRequestRef.current,scope=DB;
       setDocsLoading(true);
       try {
         const r=await api('documents');
-        if (!r.ok) throw new Error(r.message||'Google error');
+        if(request!==docsRequestRef.current || scope!==DB)return;
+        if(!r.ok)throw new Error(r.message||'Google error');
         const fresh=r.documents||[];
         setDocs(fresh);
         if(Array.isArray(r.action_types) && r.action_types.length){
           const types=r.action_types.filter(x=>typeof x==='string' && x.length && x!==B('Izberi ot menyuto'));
           if(types.length){setActionTypes(types);setNewType(old=>types.includes(old)?old:types[0]);}
         }
-        setSelectedDoc(fresh[0]?fresh[0].id:'');
+        // Never override a selection made while this async request was pending.
+        setSelectedDoc(previous=>fresh.some(x=>x.id===previous)?previous:(fresh[0]?fresh[0].id:''));
         localStorage.setItem(localCacheKey('docs'),JSON.stringify(fresh));
         setError('');
-      } catch(e) { setError(e.message); }
-      finally { setDocsLoading(false); }
+      }catch(e){if(request===docsRequestRef.current && scope===DB)setError(e.message);}
+      finally{if(request===docsRequestRef.current && scope===DB)setDocsLoading(false);}
     }
     async function loadDocument(id) {
       const request=++documentRequestRef.current;
@@ -629,6 +651,7 @@
         const r=await api('documents','POST',{type:newType,place:newPlace.trim(),create_id:createId});
         if (!r.ok) throw new Error(r.message||'Create failed');
         await loadDocs();
+        setSelectedDoc(r.document.id);
         setCreating(false);setCreateId(uuid());
         await startSession(r.document);
       } catch(e) { setError(e.message); }
@@ -636,19 +659,21 @@
     }
     async function enqueue(op) {
       const item=Object.assign({op_id:uuid(),state:'pending',created:new Date().toISOString(),author:ANONYMOUS ? operatorName.trim() : ((authRef.current && authRef.current.name) || (CFG.user && CFG.user.name || ''))},op);
+      // Only the transaction's completion determines whether the local save worked.
       try {
         item.doc_name=item.doc_name || (docRef.current && docRef.current.id===item.doc_id ? docRef.current.name : (docs.find(d=>d.id===item.doc_id)||{}).name) || '';
         await database('put','queue',item);
-        await refreshQueue();
-        if(item.kind==='audio')setNotice('Аудиото е запазено локално.');
-        if (navigator.onLine && item.kind==='audio' && CFG.stt_mode==='cloud' && CFG.stt_cloud)
+      }catch(e){setError(B('NE e zapazeno: ')+e.message);return false;}
+      // A failed UI refresh does not undo a durable IndexedDB commit.
+      try {
+        const refreshed=await refreshQueue();
+        if(!refreshed)setNotice('Записът е запазен локално, но списъкът не е обновен.');
+        else if(item.kind==='audio')setNotice('Аудиото е запазено локално.');
+        if(navigator.onLine && item.kind==='audio' && CFG.stt_mode==='cloud' && CFG.stt_cloud)
           window.setTimeout(()=>processAudioQueue(),30);
-        else if (navigator.onLine && item.kind!=='audio') window.setTimeout(()=>syncAll(),20);
-        return true;
-      } catch(e) {
-        setError(B('NE e zapazeno: ')+e.message);
-        return false;
-      }
+        else if(navigator.onLine && item.kind!=='audio')window.setTimeout(()=>syncAll(),20);
+      }catch(e){setNotice('Записът е запазен локално; опресни списъка.');}
+      return true;
     }
     // Offline-first cloud STT: the blob is saved before this function can run.
     // Only a short-lived, scoped ticket crosses the WordPress boundary.
@@ -1074,25 +1099,38 @@
         try{await queuePhotosAfterLog(log,photos);setPhotos([]);}catch(e){setError(e.message);}
       }
     }
-    async function saveAudioClip(docForRecording,blob,when,fieldTarget,signal) {
+    async function saveAudioClip(docForRecording,blob,when,fieldTarget,signal,opId) {
       if(!blob||!blob.size)return false;
+      // Retry must reuse the same operation ID, even after an ambiguous local error.
+      const stableId=opId||uuid();
+      if(opId){
+        try {
+          const existing=await database('get','queue',stableId);
+          if(existing){
+            setUnsavedAudio(null);
+            await refreshQueue();
+            setNotice('Аудиото вече е запазено локално.');
+            return true;
+          }
+        }catch(e){setError('Локална база: '+e.message);return false;}
+      }
       const audio={kind:'audio',doc_id:docForRecording.id,doc_name:docForRecording.name,
-        op_id:uuid(),blob,event_at:when,state:'audio',mic_signal:signal||null};
+        op_id:stableId,blob,event_at:when,state:'audio',mic_signal:signal||null};
       if(fieldTarget)audio.target=Object.assign({kind:'field'},fieldTarget);
       if(await enqueue(audio)){
         setUnsavedAudio(null);
         if(!fieldTarget)try{await queuePhotosAfterLog(audio,photos);setPhotos([]);}catch(e){setError(e.message);}
         return true;
       }
-      // The in-memory recording remains available for an immediate local download.
-      setUnsavedAudio({blob,docForRecording,when,fieldTarget,signal});
+      // Keep in-memory bytes and the same operation ID for an explicit retry.
+      setUnsavedAudio({blob,docForRecording,when,fieldTarget,signal,op_id:stableId});
       setError('Аудиото НЕ е съхранено. Изтегли резервно копие преди затваряне на страницата.');
       return false;
     }
     async function retryUnsavedAudio(){
       if(!unsavedAudio)return;
       await saveAudioClip(unsavedAudio.docForRecording,unsavedAudio.blob,
-        unsavedAudio.when,unsavedAudio.fieldTarget,unsavedAudio.signal);
+        unsavedAudio.when,unsavedAudio.fieldTarget,unsavedAudio.signal,unsavedAudio.op_id);
     }
     function downloadBlob(blob,when){
       if(!blob||!blob.size)return;
@@ -1461,6 +1499,7 @@
       }
     }
     const waiting=queue.filter(o=>o.state!=='synced'&&o.state!=='cancelled').length;
+    const localSaveFailed=!!unsavedAudio;
     const myQueue=queue.filter(o=>!doc||o.doc_id===doc.id).slice().reverse();
     const logs=data&&data.LOG||[];
     const title=doc&&doc.name||'Документ за координация на акция';
@@ -1666,7 +1705,14 @@
             h(Button,{secondary:true,onClick:()=>{setRowAdd(!rowAdd);setRowFields([]);}},icon('plus',17),' ',B('Nov red'))),
           rowAdd&&h('div',{className:'bv-card bv-new-row'},
             (page==='TEAM'?['Dve imena','Telefon','Transport','Momentna lokatsiya','Predvaritelen chas','Realno pristigane','Priklyuchvane']:['Avtomobili i ekipirovka','Broi','Otgovornik','Informatsiya']).map((label,i)=>h('label',{key:i},B(label),h('input',{className:'bv-input',value:rowFields[i]||'',onChange:e=>setRowFields(old=>{const x=old.slice();x[i]=e.target.value;return x;})}))),
-            h(Button,{disabled:!rowFields.some(v=>v&&v.trim()),onClick:async()=>{await enqueue({kind:'add_row',doc_id:doc.id,sheet:page,values:rowFields});setRowAdd(false);setRowFields([]);}},B('Dobavi'))),
+            h(Button,{disabled:rowSaving||!rowFields.some(v=>v&&v.trim()),onClick:async()=>{
+              if(rowSaving)return;
+              setRowSaving(true);
+              try {
+                const ok=await enqueue({kind:'add_row',doc_id:doc.id,sheet:page,values:rowFields});
+                if(ok){setRowAdd(false);setRowFields([]);}
+              }finally{setRowSaving(false);}
+            }},B('Dobavi'))),
           !data&&docLoading&&loadingRows('Зареждане на '+(page==='TEAM'?'екипа':'техниката')+'...'),
           data&&data[page]&&data[page].filter(r=>r.row>2).map(record=>h('div',{className:'bv-card bv-record',key:record.row},
             h('button',{className:'bv-record-title',onClick:()=>openEdit(page,record.row,'B',page==='TEAM'?B('Dve imena'):B('Ekipirovka'),record.cells[1],record.row_key)},record.cells[1]||B('Red ')+record.row,icon('edit',15)),
@@ -1679,7 +1725,9 @@
         ),
         h('footer',{className:'bv-bottom'},
           h('div',{className:'bv-row spread'},
-            h('span',{className:'bv-footer-status'},icon(waiting?'clock':'check',17),waiting?waiting+' '+B('chakashti operatsii'):B('Vsichko e sinhronizirano')),
+            h('span',{className:'bv-footer-status',role:localSaveFailed?'alert':'status'},
+              icon(localSaveFailed?'alert':waiting?'clock':'check',17),
+              localSaveFailed?B('Audioto NE e zapazeno lokalno'):waiting?waiting+' '+B('chakashti operatsii'):B('Vsichko e sinhronizirano')),
             h('button',{className:'bv-plain',onClick:syncAll,disabled:!online},icon('refresh',16),' ',B('Sinhroniziray'))),
           h('button',{className:'bv-plain',onClick:closeSession,disabled:recording},icon('back',16),' ',B('Smeni aktsiyata')))),
       (queue.some(o=>['conflict','audio','transcribing','review','voice_review','error','local_error'].includes(o.state)))&&h('section',{className:'bv-pending'},
@@ -1773,7 +1821,7 @@
           h('div',{className:'bv-row spread'},h('h3',null,B('Promeni pole')+' '+(editing.label||editing.col+editing.row)),
             h('button',{className:'bv-icon-btn',onClick:()=>setEditing(null)},icon('close',20))),
           h('p',{className:'bv-muted'},B('Predishna stoynost: ')+(editing.base||B('(prazno)'))),
-          (editing.sheet==='INFO' && (Array.isArray(editing.choices) && editing.choices.length || editing.field_label===B('Aktsiya')))
+          (editing.sheet==='INFO' && (editing.is_action_primary || (Array.isArray(editing.choices) && editing.choices.length>0)))
             ?h('select',{className:'bv-input',value:editValue,onChange:e=>setEditValue(e.target.value)},
               [editValue].concat(editing.choices&&editing.choices.length?editing.choices:actionTypes)
                 .filter((v,i,a)=>v&&a.indexOf(v)===i).map(v=>h('option',{key:v,value:v},v)))
@@ -1793,7 +1841,8 @@
           const audios=data&&data.FIELD_AUDIO&&data.FIELD_AUDIO[key];
           return h('div',{className:'bv-info-col',key:field.col},
             h('button',{className:'bv-info-val',onClick:()=>openEdit('INFO',rowNum,field.col,record.label,cell,'',
-              {field_label:record.label,header_label:field.header,section:record.section,choices:field.choices||[]})},
+              {field_label:record.label,header_label:field.header,section:record.section,
+                choices:field.choices||[],is_action_primary:record.label===B('Aktsiya')&&j===0})},
               h('span',null,field.header||B('Stoynost')),
               h('span',{className:'bv-value'},cell||B('Popqlni'),icon('edit',15))),
             (Array.isArray(audios)?audios:[]).map(a=>h('button',{key:a.id,type:'button',
