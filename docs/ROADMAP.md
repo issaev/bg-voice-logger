@@ -1,6 +1,6 @@
 # BG Voice Logger — Development & Performance Roadmap
 
-> **Status:** operator reports v0.7.2 deployed in production (WP 0.7.2 / JS 0.7.2-c6f4de4c832a). v0.7.2.1 is a tested hotfix candidate in `fix/v0.7.2.1-hotfix`, NOT deployed. v0.8.0 remains proposed.
+> **Status (operator report, 2026-11-24):** v0.7.2.1 has been **deployed in production**. Expected JS `0.7.2.1-613947b7e695`; live response and deployed GAS revision not independently verified in this update. iPhone, Sheets and timeout acceptance still open. v0.8.0 remains proposed.
 > **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
 > **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
@@ -59,7 +59,7 @@ The report was obtained without modifying production code, data, caches or queue
 
 ### v0.7.2.1 hotfix status (2026-11-24)
 
-Draft hotfix `fix/v0.7.2.1-hotfix` combines the continuous LOG stream from PR #19 with #15 transport/diagnostics and #17 scoped-error fixes. Local targeted PHP/JS/GAS tests pass; the full isolated suite is **22/32 PASS** with the same 10 inherited failures. **Production remains v0.7.2** until explicit release approval and hands-on iPhone/Sheets acceptance. The 35s timeout does not resolve a 115s GAS execution; profiling for #16 remains on the v0.8.0 track.
+Draft hotfix `fix/v0.7.2.1-hotfix` combines the continuous LOG stream from PR #19 with #15 transport/diagnostics and #17 scoped-error fixes. Local targeted PHP/JS/GAS tests pass; the full isolated suite is **22/32 PASS** with the same 10 inherited failures. **Production deployment of v0.7.2.1 is operator-reported**; hands-on iPhone/Sheets acceptance remains open. The 35s timeout does not resolve a 115s GAS execution; profiling for #16 remains on the v0.8.0 track.
 
 ### v0.7.2 — performance and usability work (some changes require coordinated GAS deployment)
 
