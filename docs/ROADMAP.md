@@ -1,7 +1,8 @@
 # BG Voice Logger — Development & Performance Roadmap
 
 > **Status:** proposed release plan / living backlog, not an approved release schedule.
-> **Baseline:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
+> **Performance baseline B0:** WordPress plugin v0.7.0; JS build `0.7.0-5cabd2394a0e`; audit 2026-11-23.
+> **Reported production deployment (2026-11-24):** WordPress v0.7.1, JS build `0.7.1-3d2b0c59217f`; 8/8 isolated verification tests passed, end-to-end acceptance still pending.
 > **Last reviewed:** 2026-11-24.
 > **Source of truth for issues:** [GitHub Issues](https://github.com/issaev/bg-voice-logger/issues).
 > **Deployment rule:** no WordPress, Google Apps Script, or Cloudflare production deployment without explicit approval.
@@ -20,13 +21,26 @@ The app maintains the operational record of search-and-rescue incidents. **Corre
 
 ## 2. Proposed release sequence
 
-The version numbers and release scope below are **proposals**, not deployed versions or guaranteed dates.
+v0.7.1 was **deployed to production by the operator on 2026-11-24**, confirmed by a read-only installed-source/public-response check. v0.7.2 and v0.8.0 are **proposals** without guaranteed dates. A deployment report is not full functional acceptance.
 
 | Proposed release | Objective | Required work / tickets | Exit criteria |
 | --- | --- | --- | --- |
-| **v0.7.1 — Reliability Hotfix** | Protect locally entered and recorded operational data | P1 [#2](https://github.com/issaev/bg-voice-logger/issues/2), [#3](https://github.com/issaev/bg-voice-logger/issues/3), [#4](https://github.com/issaev/bg-voice-logger/issues/4), [#5](https://github.com/issaev/bg-voice-logger/issues/5), [#8](https://github.com/issaev/bg-voice-logger/issues/8), [#11](https://github.com/issaev/bg-voice-logger/issues/11); retain Safari/IndexedDB regression checks | No known reproducible data-loss/false-sync paths in isolation; safe retry and stable op IDs; INFO text editor works; Safari verification recorded |
+| **v0.7.1 — Reliability Hotfix (production; acceptance pending)** | Protect locally entered and recorded operational data | P1 [#2](https://github.com/issaev/bg-voice-logger/issues/2), [#3](https://github.com/issaev/bg-voice-logger/issues/3), [#4](https://github.com/issaev/bg-voice-logger/issues/4), [#5](https://github.com/issaev/bg-voice-logger/issues/5), [#8](https://github.com/issaev/bg-voice-logger/issues/8), [#11](https://github.com/issaev/bg-voice-logger/issues/11); retain Safari/IndexedDB regression checks | No known reproducible data-loss/false-sync paths in isolation; safe retry and stable op IDs; INFO text editor works; Safari verification recorded |
 | **v0.7.2 — Performance & Usability** | Reduce redundant operations and improve speed and long-incident usability | [#6](https://github.com/issaev/bg-voice-logger/issues/6), [#9](https://github.com/issaev/bg-voice-logger/issues/9), [#10](https://github.com/issaev/bg-voice-logger/issues/10), [#12](https://github.com/issaev/bg-voice-logger/issues/12); assess unused `/dka/` assets; guarded snapshot-first and measured UI-ready/fresh-Google timings | One refresh per LOG batch; top queue/review access without scrolling; user-selectable incident date; no stale/cross-user data; comparable before/after evidence |
 | **v0.8.0 — Sheets & Media Architecture** | Scale long incident logs and speed up private media | [#7](https://github.com/issaev/bg-voice-logger/issues/7); bounded/batched Sheets reads; template metadata caching with invalidation; authenticated binary/resumable media and Range playback; review WP↔GAS lock/timeout contract | Same media bytes, MIME and access control; resumable/idempotent uploads; manual Sheets edit conflicts preserved; measured first-play, full download, read and sync results |
+
+### Production status update — 2026-11-24
+
+The operator reports **v0.7.1 deployed in production**, supported by a read-only check of the installed JS and public `/dka/` response:
+
+- WordPress plugin version **0.7.1**; embedded JS build **`0.7.1-3d2b0c59217f`**.
+- Public `app.js?ver=0.7.1-a6771689c8e5` matched the installed JS SHA256 **`a6771689c8e5d3f61cac2cabe5434399a6d0536e0bd71e6dccf49e3b78493022`** (one public response, CF cache MISS; not proof that every iPhone has refreshed its cache).
+- **8 of 8 isolated Node tests passed** using extracted installed functions and mocked storage/UI, including atomic orphan cleanup, durable-save status, TEAM/TECH form preservation, footer unsaved-audio warning, stable retry ID, and a Blob conversion control.
+- **Not yet verified end to end:** real Safari/IndexedDB, Google OAuth, deployed Apps Script version, Google Sheets/Drive data writes, cross-device media playback, conflict/retry/parallel-tab behavior. The 8 tests do **not** establish acceptance for INFO comments [#8](https://github.com/issaev/bg-voice-logger/issues/8) or the incident chooser [#11](https://github.com/issaev/bg-voice-logger/issues/11) on production.
+- Remaining known performance problems: [#6](https://github.com/issaev/bg-voice-logger/issues/6) duplicate LOG refresh reads and [#7](https://github.com/issaev/bg-voice-logger/issues/7) complete audio download before playback. These belong to later work.
+- **Source control drift:** public GitHub `main` still contains v0.7.0; [draft PR #13](https://github.com/issaev/bg-voice-logger/pull/13) contains the v0.7.1 source. **Do not start the next feature branch from obsolete main** until the release source is reconciled. PR #13 remains unmerged pending separate explicit approval. Keep all Issue acceptance criteria open until verified.
+
+The report was obtained without modifying production code, data, caches or queues. Do not claim full production validation or invent missing benchmark values.
 
 ### v0.7.1 — P1 reliability checklist
 
@@ -134,4 +148,4 @@ A proposed version is ready to ship only if **all** checks relevant to its scope
 
 ---
 
-*This roadmap organizes the existing REQ-026 audit and open issues; it does not claim that a new build has been produced, tested end to end, or deployed.*
+*This roadmap combines the original REQ-026 audit with a subsequently reported v0.7.1 production deployment. Full end-to-end validation and reconciliation of GitHub main with the deployed release remain outstanding.*
