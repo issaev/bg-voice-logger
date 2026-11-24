@@ -98,7 +98,9 @@ add_action('init', function () {
         header('Content-Type: application/manifest+json; charset=UTF-8');
         header('Cache-Control: no-store');
         echo wp_json_encode(array(
-            'name' => 'Документ за координация на акция', 'short_name' => 'ДКА',
+            'name' => 'Документ за Координация на Акция', 'short_name' => 'ДКА',
+            'id' => wp_parse_url(bvlog_app_url(), PHP_URL_PATH) ?: '/',
+            'scope' => wp_parse_url(bvlog_app_url(), PHP_URL_PATH) ?: '/',
             'start_url' => bvlog_app_url(), 'display' => 'standalone',
             'background_color' => '#f1f5f9', 'theme_color' => '#0f355b',
             'icons' => array(
@@ -187,6 +189,9 @@ add_action('wp_head', function () {
         if ($post && has_shortcode($post->post_content, 'bg_voice_logger')) {
             echo '<link rel="manifest" href="' . esc_url(home_url('/?bvlog_manifest=1')) . '">';
             echo '<meta name="theme-color" content="#0f355b">';
+            echo '<meta name="apple-mobile-web-app-capable" content="yes">';
+            echo '<meta name="apple-mobile-web-app-title" content="ДКА">';
+            echo '<link rel="apple-touch-icon" href="' . esc_url(BVLOG_URL . 'assets/icon-192.png') . '">';
         }
     }
 });

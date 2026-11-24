@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.7.2.1-0963fd4edd8f';
+  const BVLOG_RUNNING_BUILD = '0.7.2.1-ecb7252e43fe';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -53,6 +53,7 @@
       map: ['M12 22s8-7 8-13a8 8 0 0 0-16 0c0 6 8 13 8 13z','M12 9a2 2 0 1 0 0 4 2 2 0 0 0 0-4'],
       shield: ['M12 2l9 4v6c0 6-4 9-9 10C7 21 3 18 3 12V6z','M9 12l2 2 4-4'],
       upload: ['M12 16V3','M7 8l5-5 5 5','M3 16v5h18v-5'],
+      download: ['M12 3v12','M5 10l7 7 7-7','M4 20h16'],
       settings: ['M12 2v2','M12 20v2','M2 12h2','M20 12h2','M4.9 4.9l1.4 1.4','M17.7 17.7l1.4 1.4','M19.1 4.9l-1.4 1.4','M6.3 17.7l-1.4 1.4','M12 8a4 4 0 1 0 0 8a4 4 0 0 0 0-8'],
       more:['M5 12h.01','M12 12h.01','M19 12h.01']
     };
@@ -380,10 +381,11 @@
     pctx.drawImage(cv,Math.round((640-w)/2),Math.round((480-hh)/2),w,hh);
     let previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.7));
     if(previewBlob&&previewBlob.size>350000)previewBlob=await new Promise(resolve=>preview.toBlob(resolve,'image/jpeg',0.42));
+    const previewSrc=preview.toDataURL('image/jpeg',0.65);
     preview.width=0;preview.height=0;cv.width=0;cv.height=0;
     if(!blob||blob.size>2400000)throw new Error('Снимката е твърде голяма след компресиране.');
     if(!previewBlob||previewBlob.size>350000)throw new Error('Неуспешно създаване на миниатюра.');
-    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg'};
+    return {blob:blob,previewBlob:previewBlob,name:(file.name||'photo.jpg').replace(/[^A-Za-z0-9_.-]/g,'_').slice(0,80),mime:'image/jpeg',previewSrc};
   }
   // Capture a calendar day in Sofia, not a UTC timestamp.
   function sofiaTodayISO(){return new Date().toLocaleDateString('sv-SE',{timeZone:'Europe/Sofia'});}
@@ -393,6 +395,18 @@
     const utc=new Date(Date.UTC(year,month-1,day));
     return utc.getUTCFullYear()===year&&utc.getUTCMonth()===month-1&&utc.getUTCDate()===day;
   }
+  function installedAsPwa() {
+    try {
+      return navigator.standalone===true ||
+        !!(window.matchMedia && window.matchMedia('(display-mode: standalone)').matches);
+    }catch(e){return false;}
+  }
+  function iosInstallDevice() {
+    const ua=String(navigator.userAgent||'');
+    return /iPhone|iPad|iPod/i.test(ua) ||
+      (navigator.platform==='MacIntel' && Number(navigator.maxTouchPoints||0)>1);
+  }
+  function androidInstallDevice() {return /Android/i.test(String(navigator.userAgent||''));}
   function App() {
     const [mode,setMode]=useState('choose');
     const [doc,setDoc]=useState(null);
@@ -413,6 +427,11 @@
     const [operatorName,setOperatorName]=useState(initialOperator());
     const [online,setOnline]=useState(navigator.onLine);
     const [backgroundSyncAvailable,setBackgroundSyncAvailable]=useState(false);
+    const [installReady,setInstallReady]=useState(false);
+    const [installedPwa,setInstalledPwa]=useState(installedAsPwa);
+    const [installHelpOpen,setInstallHelpOpen]=useState(false);
+    const [installStatus,setInstallStatus]=useState('');
+    const installPromptRef=useRef(null);
     const [auth,setAuth]=useState(null);
     const [authLoading,setAuthLoading]=useState(true);
     const [loginChallenge,setLoginChallenge]=useState('');
@@ -505,6 +524,55 @@
       }
     }
     useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),3200);return()=>clearTimeout(timer);},[notice]);
+    useEffect(()=>{
+      // beforeinstallprompt is a browser capability, not a platform guarantee.
+      // iOS has no programmatic install prompt: offer user-visible instructions.
+      const onPrompt=e=>{
+        if(!e||typeof e.prompt!=='function')return;
+        if(typeof e.preventDefault==='function')e.preventDefault();
+        installPromptRef.current=e;
+        setInstallReady(true);
+      };
+      const onInstalled=()=>{
+        installPromptRef.current=null;
+        setInstallReady(false);setInstallHelpOpen(false);setInstalledPwa(true);
+        setInstallStatus('Приложението е добавено към началния екран.');
+      };
+      const onModeChange=()=>setInstalledPwa(installedAsPwa());
+      if(window.addEventListener){
+        window.addEventListener('beforeinstallprompt',onPrompt);
+        window.addEventListener('appinstalled',onInstalled);
+      }
+      const media=window.matchMedia?window.matchMedia('(display-mode: standalone)'):null;
+      if(media?.addEventListener)media.addEventListener('change',onModeChange);
+      return()=>{
+        if(window.removeEventListener){
+          window.removeEventListener('beforeinstallprompt',onPrompt);
+          window.removeEventListener('appinstalled',onInstalled);
+        }
+        if(media?.removeEventListener)media.removeEventListener('change',onModeChange);
+      };
+    },[]);
+    async function installOnPhone() {
+      setInstallStatus('');
+      const pending=installPromptRef.current;
+      if(pending&&typeof pending.prompt==='function'){
+        // Consume on the user click: prompt() must not run from an effect/timer.
+        installPromptRef.current=null;
+        setInstallReady(false);
+        try {
+          const result=await pending.prompt();
+          const choice=pending.userChoice?await pending.userChoice:result;
+          if(choice&&choice.outcome==='accepted'){
+            setInstallStatus('Заявката за инсталиране е приета от браузъра.');
+            setInstallHelpOpen(false);
+          }else setInstallHelpOpen(true);
+        }catch(e){
+          // A prompt can expire or be blocked; provide safe manual instructions.
+          setInstallHelpOpen(true);
+        }
+      }else setInstallHelpOpen(true);
+    }
     useEffect(()=>{
       if(!microphoneMenu||!navigator.mediaDevices||!navigator.mediaDevices.enumerateDevices)return;
       let live=true;
@@ -1248,15 +1316,26 @@
       }
     }
     async function uploadExistingPhoto(entry,files) {
+      if(!doc||!entry||!Array.isArray(entry.cells))return;
+      const targetDoc={id:doc.id,name:doc.name};
+      const selected=Array.from(files||[]).slice(0,3);
+      if(!selected.length)return;
+      setPhotoBusy(true);
       try {
-        if(!doc)return;
-        for(const file of Array.from(files||[]).slice(0,3)){
+        let saved=0;
+        for(const file of selected){
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
           const image=await preparePhoto(file);
-          await enqueue({kind:'photo',doc_id:doc.id,doc_name:doc.name,
+          if(docRef.current?.id!==targetDoc.id)throw new Error('Акцията е сменена. Снимката не е прикачена.');
+          const ok=await enqueue({kind:'photo',doc_id:targetDoc.id,doc_name:targetDoc.name,
             target_row:entry.row,expected_time:entry.cells[1],expected_text:entry.cells[3],
             blob:image.blob,preview_blob:image.previewBlob,filename:image.name,mime:image.mime});
+          if(!ok)throw new Error('Снимката не е запазена локално.');
+          saved++;
         }
+        if(saved)setNotice('Снимките са запазени локално за изпращане.');
       }catch(e){setError(e.message);}
+      finally{setPhotoBusy(false);}
     }
     function canDiscardInterruptedAudio(o){
       return o && o.kind==='audio_upload' && o.state==='sending' &&
@@ -1843,7 +1922,7 @@
     return h('div',{className:'bv-shell '+((audioPlayer||audioBusy)?'bv-has-audio':'')},
       h('header',{className:'bv-header'},
         h('div',{className:'bv-brand'},h('span',{className:'bv-brand-icon'},h('img',{src:CFG.logo_url||'',alt:'СКБ'})),
-          h('div',null,h('strong',null,'Документ за координация на акция'),h('small',null,'Спасителен клуб за бъдеще'),
+          h('div',null,h('strong',{className:'bv-brand-title'},'Документ за Координация на Акция'),h('small',null,'Спасителен клуб за бъдеще'),
             h('small',{className:'bv-build-id',title:'Running JavaScript build (not the HTML-configured version)'},
               'WP '+(CFG.plugin_version||'?')+' / JS '+BVLOG_RUNNING_BUILD))),
         h('div',{className:'bv-top-controls'},
@@ -1886,6 +1965,22 @@
         'Необходим е WordPress вход.', h('a',{href:'/wp-login.php?redirect_to='+encodeURIComponent(location.href)},'Вход'))) :
       mode==='choose' ? h('main',{className:'bv-content'},
         h('div',{className:'bv-headline'},h('h1',null,B('Izbor na aktsiya')),h('p',null,B('Izberi dokument ili sqzday nov ot shablona.'))),
+        !installedPwa&&h('section',{className:'bv-card bv-install-card','aria-label':'Инсталиране на приложението'},
+          h('button',{type:'button',className:'bv-install-btn',onClick:installOnPhone,
+            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},
+            icon('download',18),' Инсталирай приложението на телефона'),
+          h('p',{className:'bv-install-caption'},installReady?
+            'Браузърът може да предложи инсталиране с един бутон.':
+            'Добави пряк път като приложение на началния екран.'),
+          installStatus&&h('p',{className:'bv-install-status',role:'status'},installStatus),
+          installHelpOpen&&h('div',{id:'bvlog-install-help',className:'bv-install-help',role:'region',
+            'aria-label':'Инструкции за инсталиране'},
+            iosInstallDevice() ?
+              h('p',null,'На iPhone/iPad: отвори страницата в Safari, натисни „Споделяне“ (Share), избери „Добави към началния екран“ (Add to Home Screen), включи „Отваряне като приложение“ ако се показва и натисни „Добави“.') :
+              androidInstallDevice() ?
+                h('p',null,'На Android: отвори страницата в Chrome, натисни менюто ⋮, после „Инсталиране на приложението“ или „Добавяне към началния екран“. Ако опцията липсва, провери дали сайтът е отворен през HTTPS в браузър.') :
+                h('p',null,'Отвори приложението на телефона. В Android Chrome избери ⋮ → Инсталиране; на iPhone Safari избери Споделяне → Добави към началния екран.'),
+            h('button',{type:'button',className:'bv-install-help-close',onClick:()=>setInstallHelpOpen(false)},'Скрий инструкциите'))),
         ANONYMOUS&&h('div',{className:'bv-card bv-operator-card'},
           h('label',null,B('Ime na operatora'),
             h('input',{className:'bv-input',type:'text',autoComplete:'name',value:operatorName,maxLength:80,required:true,placeholder:B('Dve imena'),onChange:e=>changeOperatorName(e.target.value)})),
@@ -1897,6 +1992,7 @@
             h('button',{type:'button',onClick:loadDocs,disabled:docsLoading},'Опитай отново')),
           docs.length ? h('select',{className:'bv-input',value:selectedDoc,onChange:e=>selectExistingDocument(e.target.value)},docs.map((d,i)=>h('option',{key:d.id,value:d.id},(i===0?'* ':'')+d.name)))
           : h('p',{className:'bv-muted'},docsLoading?B('Zarezhdane...'):B('Nyama drugi dokumenti v papkata.')),
+          docs.length&&h('small',{className:'bv-doc-folder-hint'},'Всички показани таблици са от папката — независимо от името.'),
           h(Button,{disabled:!selectedDoc,onClick:()=>{
             const chosen=docs.find(d=>d.id===selectedDocRef.current && d.id===selectedDoc);
             if(!chosen){setDocsError('Избраната акция е променена или липсва. Избери я отново.');return;}
@@ -1977,12 +2073,13 @@
               h('button',{onClick:submitText,disabled:!draft.trim(),title:B('Zapishi')},icon('arrow',20)))),
           h('div',{className:'bv-photo-tools'},
             h('label',{className:'bv-photo-pick'},icon('image',17),' Качи снимка',
-              h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+              h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
             h('label',{className:'bv-photo-pick'},icon('camera',17),' Снимай',
-              h('input',{type:'file',accept:'image/*',capture:'environment',onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+              h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
             photoBusy&&h('small',null,'Обработва снимката...'),
             photos.length>0&&h('button',{className:'bv-photo-pick',onClick:submitPhotoOnly},icon('upload',16),' Запиши само снимка'),
-            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},p.name,
+            photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},
+              p.previewSrc&&h('img',{className:'bv-photo-chip-preview',src:p.previewSrc,alt:'Преглед на снимка'}),p.name,
               h('button',{title:'Премахни снимката',onClick:()=>setPhotos(q=>q.filter((_,j)=>j!==i))},icon('close',13))))),
           h('div',{className:'bv-section-head'},h('h3',null,B('Posledni sqbitiya')),
             h('button',{className:'bv-icon-btn',onClick:()=>loadDocument(doc.id),title:B('Obnovi')},icon('refresh',18))),
@@ -2033,8 +2130,10 @@
                     x.audio&&h('button',{type:'button',className:'bv-photo-indicator',
                       disabled:audioBusy===x.audio.id,onClick:()=>playRemoteAudio(x)},icon('play',15),
                       audioBusy===x.audio.id?' Зарежда аудиото...':' Чуй оригинала'),
-                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' Прикачи снимка',
-                      h('input',{type:'file',accept:'image/*',multiple:true,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' От галерията',
+                      h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h('label',{className:'bv-attach-inline bv-attach-camera'},icon('camera',15),' Снимай',
+                      h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
                     !cancelled&&h('button',{type:'button',className:'bv-event-menu-button',
                       'aria-label':'Действия за събитието','aria-expanded':eventMenu===x.row,
                       onClick:()=>setEventMenu(eventMenu===x.row?null:x.row)},icon('more',20))),
@@ -2161,7 +2260,6 @@
           h('p',{className:'bv-muted'},backgroundSyncAvailable ?
             'Фоновото изпращане е разрешено, но Android може временно да го спре. Непотвърдените записи остават локално.' :
             'При заключване или спиране на приложението изпращането ще се възобнови автоматично след отваряне и връзка.'),
-          CFG.auth_mode==='google'&&h('button',{className:'bv-retry-op',onClick:importLegacyQueue},'Импорт на стари записи от v0.2.2'),
           localSaveFailed&&h('div',{className:'bv-unsaved-audio',role:'alert'},
             h('strong',null,'Има незапазено аудио!'),
             h('button',{type:'button',onClick:()=>downloadBlob(unsavedAudio.blob,unsavedAudio.when)},'Изтегли резервно копие'),
