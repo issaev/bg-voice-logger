@@ -200,6 +200,21 @@
       return (c==='x'?v:(v&3|8)).toString(16);
     });
   }
+  const READ_RETRY_DELAYS_MS = [5000,15000,30000];
+  const MAX_TRANSIENT_WRITE_ATTEMPTS = 5;
+  function isTransientRequestError(error) {
+    if (!error || error.name==='AbortError') return false;
+    if (error.retryable===true) return true;
+    if (error.retryable===false) return false;
+    const status=Number(error.status||0);
+    if (status) return [408,424,429,500,502,503,504].includes(status)||status>=500;
+    return /failed to fetch|networkerror|network request failed|load failed|timed? ?out/i.test(String(error.message||''));
+  }
+  function writeRetryDelayMs(attempt) {
+    // Jitter prevents many reconnecting phones from retrying together.
+    const base=Math.min(300000,5000*Math.pow(2,Math.max(0,attempt-1)));
+    return Math.round(base*(0.8+0.4*Math.random()));
+  }
   async function api(path, method, data, signal) {
     const opts = {method:method||'GET',headers:{},credentials:'same-origin'};
     if(signal)opts.signal=signal;
@@ -210,19 +225,38 @@
       opts.headers['Content-Type']='application/json';
       opts.body=JSON.stringify(data||{});
     }
-    let r = await fetch(CFG.api+path,opts);
+    const fetchSafe=async(url,options)=>{
+      try { return await fetch(url,options); }
+      catch (cause) {
+        if(cause&&cause.name==='AbortError')throw cause;
+        const error=new Error('Временен проблем с връзката (Failed to fetch).');
+        error.code='network';error.retryable=true;error.name='BvlogNetworkError';
+        throw error;
+      }
+    };
+    let r = await fetchSafe(CFG.api+path,opts);
     if (r.status===403 && CFG.nonce && CFG.user && CFG.user.id && navigator.onLine) {
-      const reset = await fetch(CFG.nonce_url,{credentials:'same-origin'});
+      const reset = await fetchSafe(CFG.nonce_url,{credentials:'same-origin'});
       const answer = await reset.json();
       if (answer.success && answer.data && answer.data.nonce) {
         CFG.nonce = answer.data.nonce;
         opts.headers['X-WP-Nonce']=CFG.nonce;
-        r = await fetch(CFG.api+path,opts);
+        r = await fetchSafe(CFG.api+path,opts);
       }
     }
     let out;
-    try { out = await r.json(); } catch (err) { throw new Error('Invalid server response (HTTP '+r.status+').'); }
-    if (!r.ok) throw new Error(out.message||'HTTP '+r.status);
+    try { out = await r.json(); } catch (err) {
+      const error=new Error('Невалиден отговор от сървъра (HTTP '+r.status+').');
+      error.status=r.status;error.code='invalid_json';
+      error.retryable=[408,424,429,500,502,503,504].includes(r.status)||r.status>=500;
+      throw error;
+    }
+    if (!r.ok) {
+      const error=new Error(out.message||'HTTP '+r.status);
+      error.status=r.status;error.code=String(out.code||'');
+      error.retryable=[408,424,429,500,502,503,504].includes(r.status)||r.status>=500;
+      throw error;
+    }
     return out;
   }
   function today(time) {
@@ -373,6 +407,8 @@
     const documentRequestRef=useRef(0);
     const documentReadInFlightRef=useRef(null);
     const readBackoffRef=useRef({id:'',attempts:0,nextAt:0});
+    const readRetryRef=useRef({id:'',attempts:0,nextAt:0,timer:null,exhausted:false});
+    const writeRetryTimerRef=useRef(null);
     const [draft,setDraft]=useState('');
     const [liveText,setLiveText]=useState('');
     const [recording,setRecording]=useState(false);
