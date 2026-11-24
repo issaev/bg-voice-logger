@@ -3,6 +3,26 @@ if (!defined('ABSPATH')) { exit; }
 
 class BVLOG_API {
     private static $bridge_request_id = '';
+    private static $bridge_timings = array();
+
+    /** Only bounded numeric timing data and fixed phase labels reach admin history. */
+    private static function accept_google_timings($diagnostics) {
+        if (!is_array($diagnostics) || ($diagnostics['request_id'] ?? '') !== self::$bridge_request_id) return;
+        $allowed=array('lock_wait','create_start','create_validated','create_reserved','create_copied',
+            'create_recovered','create_fields_set','create_prepared','create_flushed','create_published','create_confirmed',
+            'read_start','document_opened','sheet_handles_loaded','info_schema_loaded','info_loaded','log_end_scanned',
+            'log_values_loaded','log_richtext_loaded','log_loaded','photos_loaded','audio_index_loaded','history_loaded',
+            'log_assembled','team_tech_loaded','read_complete','list_start','list_files_loaded','list_types_loaded',
+            'operation_start','operation_complete');
+        $total=$diagnostics['gas_ms']??null;
+        if(is_int($total)&&$total>=0&&$total<=360000)self::$bridge_timings['gas_ms']=$total;
+        $phases=$diagnostics['phases_ms']??array();
+        if(!is_array($phases))return;
+        foreach($allowed as $phase){
+            $ms=$phases[$phase]??null;
+            if(is_int($ms)&&$ms>=0&&$ms<=360000)self::$bridge_timings['gas_phases_ms'][$phase]=$ms;
+        }
+    }
 
     /** Diagnostic classification only: do not log submitted text or Drive URLs. */
     private static function diagnostic_action($action, $payload) {
@@ -111,6 +131,7 @@ class BVLOG_API {
             'elapsed_ms' => (int)round((microtime(true) - $started) * 1000),
             'http_status' => (int)$http_status,
             'detail' => preg_replace('/[^A-Za-z0-9_.:-]/', '_', substr((string)$detail, 0, 100)),
+            'timings' => self::$bridge_timings,
         );
         update_option('bvlog_bridge_diagnostics', $snapshot, false);
         // Preserve terminal outcomes even when a later successful request replaces
@@ -139,6 +160,7 @@ class BVLOG_API {
     public static function forward($action, $payload = array()) {
         $started = microtime(true);
         self::$bridge_request_id = substr(str_replace('-', '', wp_generate_uuid4()), 0, 12);
+        self::$bridge_timings = array();
         $diag_action = self::diagnostic_action($action, $payload);
         $s = bvlog_settings();
         $secret = defined('BVLOG_SHARED_SECRET') ? BVLOG_SHARED_SECRET : get_option('bvlog_shared_secret', '');
@@ -165,6 +187,7 @@ class BVLOG_API {
         // giving slower Google Drive media calls time to complete.
         $request_timeout = 15;
         $redirect_timeout = 12;
+        if ($diag_action === 'create') { $request_timeout = 45; $redirect_timeout = 15; }
         if ($diag_action === 'read') { $request_timeout = 35; $redirect_timeout = 15; }
         if ($diag_action === 'audio_read') { $request_timeout = 45; $redirect_timeout = 25; }
         elseif ($diag_action === 'photo_read') { $request_timeout = 35; $redirect_timeout = 25; }
@@ -174,6 +197,7 @@ class BVLOG_API {
         self::trace($diag_action, 'post_start', $started);
         // Google Apps Script ContentService returns a 302 to a one-time URL.
         // Handle that explicitly, using GET and WITHOUT forwarding credentials.
+        $post_started=microtime(true);
         $response = wp_remote_post($s['script_url'], array(
             'headers' => array('Content-Type' => 'application/json; charset=utf-8', 'Accept' => 'application/json'),
             'body' => wp_json_encode($body),
@@ -183,6 +207,7 @@ class BVLOG_API {
             'sslverify' => true,
             'limit_response_size' => $max_response,
         ));
+        self::$bridge_timings['post_ms']=(int)round((microtime(true)-$post_started)*1000);
         if (is_wp_error($response)) {
             self::trace($diag_action, 'post_transport_error', $started, 0, self::transport_hint($response, $request_timeout));
             return new WP_Error('bvlog_transport', 'Google POST failed: ' . $response->get_error_code() . '. See bridge diagnostics in WordPress settings.', array('status' => 424));
@@ -201,6 +226,7 @@ class BVLOG_API {
                 return new WP_Error('bvlog_google_redirect', 'Google returned an unexpected redirect target.', array('status' => 424));
             }
             self::trace($diag_action, 'get_start', $started, $status);
+            $get_started=microtime(true);
             $response = wp_safe_remote_get($location, array(
                 'headers' => array('Accept' => 'application/json'),
                 'timeout' => $redirect_timeout,
@@ -209,6 +235,7 @@ class BVLOG_API {
                 'sslverify' => true,
                 'limit_response_size' => $max_response,
             ));
+            self::$bridge_timings['redirect_ms']=(int)round((microtime(true)-$get_started)*1000);
             if (is_wp_error($response)) {
                 self::trace($diag_action, 'get_transport_error', $started, 0, self::transport_hint($response, $redirect_timeout));
                 return new WP_Error('bvlog_transport', 'Google redirect GET failed: ' . $response->get_error_code() . '. See bridge diagnostics in WordPress settings.', array('status' => 424));
@@ -227,6 +254,8 @@ class BVLOG_API {
             self::trace($diag_action, 'invalid_json', $started, $status, 'json_' . json_last_error());
             return new WP_Error('bvlog_invalid_json', 'Google response is not JSON. Check bridge diagnostics.', array('status' => 424));
         }
+        self::accept_google_timings($data['diagnostics']??null);
+        unset($data['diagnostics']); // Admin-only timing history, not browser API data.
         self::trace($diag_action, 'complete', $started, $status, isset($data['ok']) && !$data['ok'] ? 'google_rejected' : 'ok');
         if (isset($data['ok']) && !$data['ok']) {
             return rest_ensure_response(array(

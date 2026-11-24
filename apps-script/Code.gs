@@ -26,6 +26,7 @@ const BVL = {
 
 // Emit only a short random request identifier, a fixed action name, phase and
 // elapsed time. Never log payloads, document IDs, names, secrets or transcripts.
+let bvlTraceBuffer_=null;
 function bvlTrace_(requestId, action, stage, started, phaseMs) {
   const rid=/^[a-f0-9]{12}$/.test(String(requestId||'')) ? String(requestId) : 'untracked';
   const act=['read','list','operation','create','audio_read','photo_read','ping'].includes(action)
@@ -34,6 +35,13 @@ function bvlTrace_(requestId, action, stage, started, phaseMs) {
   const report={request_id:rid,action:act,stage:safeStage,
     elapsed_ms:Math.max(0,Date.now()-started)};
   if(Number.isFinite(phaseMs) && phaseMs>=0)report.phase_ms=Math.floor(phaseMs);
+  if(bvlTraceBuffer_&&rid===bvlTraceBuffer_.request_id&&safeStage!=='untracked'){
+    const phases=bvlTraceBuffer_.phases_ms;
+    if(Object.keys(phases).length<40){
+      if(safeStage==='lock_acquired'||safeStage==='lock_busy')phases.lock_wait=Math.min(360000,report.elapsed_ms);
+      else if(Number.isFinite(report.phase_ms))phases[safeStage]=Math.min(360000,report.phase_ms);
+    }
+  }
   try { console.log(JSON.stringify(report)); } catch(ignore) {}
 }
 
@@ -53,7 +61,7 @@ function bvlPhaseTracer_(requestId, action) {
 function doPost(e) {
   const start=Date.now();
   let traceId='', traceAction='other';
-
+  bvlTraceBuffer_=null;
   let result;
   try {
     const req = JSON.parse(e && e.postData && e.postData.contents || '{}');
@@ -64,6 +72,7 @@ function doPost(e) {
     if (!expected || expected.length < 24 || !req.secret || req.secret !== expected) {
       result = {ok: false, code: 'unauthorized', message: 'Invalid bridge credential.'};
     } else {
+      bvlTraceBuffer_={request_id:/^[a-f0-9]{12}$/.test(traceId)?traceId:'untracked',phases_ms:{}};
       result = bvlDispatch_(req);
     }
   } catch (err) {
@@ -71,6 +80,10 @@ function doPost(e) {
   } finally {
     bvlTrace_(traceId,traceAction,result&&result.ok===false?'completed_error':'completed',start);
   }
+  if(bvlTraceBuffer_&&result&&typeof result==='object'){
+    result.diagnostics={request_id:bvlTraceBuffer_.request_id,gas_ms:Math.min(360000,Math.max(0,Date.now()-start)),phases_ms:bvlTraceBuffer_.phases_ms};
+  }
+  bvlTraceBuffer_=null;
   const json=JSON.stringify(result);
   bvlTrace_(traceId,traceAction,'response_serialized',start);
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
@@ -86,7 +99,7 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.0'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.1'};
   }
   if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
@@ -98,7 +111,7 @@ function bvlDispatch_(request) {
     const requestStart=Date.now();
     bvlTrace_(request.request_id,action,'lock_wait_start',requestStart);
     const lock = LockService.getScriptLock();
-    if (!lock.tryLock(25000)) {
+    if (!lock.tryLock(action==='create'?8000:25000)) {
       bvlTrace_(request.request_id,action,'lock_busy',requestStart);
       return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
     }
@@ -158,7 +171,10 @@ function bvlList_(folderId, templateId, requestId) {
   while (iter.hasNext()) {
     const file = iter.next();
     if (file.getId() === templateId || file.isTrashed()) continue;
-    files.push({id:file.getId(), name:file.getName(), created:file.getDateCreated().toISOString(), url:file.getUrl()});
+    const name=file.getName();
+    // A recoverable incomplete create is never shown as an operational incident.
+    if(/^BVLOG_CREATE_PENDING_[a-f0-9-]{32,50}$/i.test(name))continue;
+    files.push({id:file.getId(), name:name, created:file.getDateCreated().toISOString(), url:file.getUrl()});
   }
   files.sort((a,b) => b.created.localeCompare(a.created));
   phase('list_files_loaded');
@@ -328,61 +344,104 @@ function bvlInfoAddRow_(ss,p) {
   return {ok:true,row:insertAt,role:role,section:section.section};
 }
 
+// Only a prepared and flushed copy receives its final incident name.
+// Reservation is durable before makeCopy. An uncertain copy is never blindly repeated.
+function bvlCreateFile_(folderId,templateId,id){
+  if(!bvlValidId_(id)||id===templateId)throw new Error('Invalid created document.');
+  const file=DriveApp.getFileById(id);
+  if(file.isTrashed()||file.getMimeType()!==BVL.MIME||!bvlParentIs_(file,folderId))
+    throw new Error('Created document is no longer in the configured folder.');
+  return file;
+}
+function bvlCreateReply_(file,deduplicated){
+  return {ok:true,document:{id:file.getId(),name:file.getName(),created:file.getDateCreated().toISOString(),url:file.getUrl()},deduplicated:!!deduplicated};
+}
+function bvlUniqueName_(folder,base){
+  let name=base,suffix=2;
+  while(folder.getFilesByName(name).hasNext())name=base+' ('+(suffix++)+')';
+  return name;
+}
 function bvlCreate_(folderId, templateId, payload, traceId) {
   const phase=bvlPhaseTracer_(traceId,'create');
   phase('create_start');
-  const folder = DriveApp.getFolderById(folderId);
-  const requestId = String(payload.create_id || '');
+  const requestId=String(payload.create_id||'').toLowerCase();
+  if(!/^[a-f0-9-]{32,50}$/.test(requestId))return {ok:false,code:'create_id',message:'A stable creation identifier is required.'};
   const chosenDate=bvlIncidentDate_(payload.incident_date);
-  const idempotentKey = /^[a-f0-9-]{32,50}$/i.test(requestId) ? 'BVLOG_CREATE_' + requestId : '';
-  if (idempotentKey) {
-    const existing = PropertiesService.getScriptProperties().getProperty(idempotentKey);
-    if (existing) {
-      try {
-        const earlier = bvlDoc_(folderId,templateId,existing);
-        return {ok:true,document:{id:existing,name:DriveApp.getFileById(existing).getName(),url:earlier.getUrl()},deduplicated:true};
-      } catch(err) { /* Deleted file or moved folder; proceed with a new copy. */ }
+  const type=bvlSafeText_(payload.type,60),place=bvlSafeText_(payload.place,100);
+  if(!place||/[\r\n\\\/<>]/.test(place))return {ok:false,code:'place',message:'Location is required; avoid path separators.'};
+  const base=chosenDate.filename+' - '+BVL.DKA+' - '+bvlCanonicalType_(type)+' - '+place;
+  const key='BVLOG_CREATE_'+requestId,props=PropertiesService.getScriptProperties();
+  const existing=props.getProperty(key),folder=DriveApp.getFolderById(folderId);
+  let job=null,copy=null,wasExisting=!!existing;
+  if(existing){
+    // Legacy successful creates (including v0.8.0.1) store only the file ID.
+    if(bvlValidId_(existing)){
+      try{return bvlCreateReply_(bvlCreateFile_(folderId,templateId,existing),true);}
+      catch(ignore){return {ok:false,code:'create_missing',message:'Previously created document cannot be located. Ask an administrator; no new copy was made.'};}
     }
+    try{job=JSON.parse(existing);}catch(ignore){}
+    if(!job||job.v!==1||job.folder!==folderId||job.template!==templateId||job.base!==base||
+      job.temp!=='BVLOG_CREATE_PENDING_'+requestId||!['copying','prepared'].includes(job.phase))
+      return {ok:false,code:'create_conflict',message:'Creation request already exists with different or invalid parameters. No new copy was made.'};
+    if(job.id){
+      try{copy=bvlCreateFile_(folderId,templateId,job.id);}
+      catch(ignore){return {ok:false,code:'create_missing',message:'Pending copy is unavailable. Ask an administrator; no new copy was made.'};}
+    }else{
+      // A previous makeCopy may have committed despite a lost response.
+      const found=folder.getFilesByName(job.temp);
+      if(!found.hasNext())return {ok:false,code:'create_unknown',message:'Previous copy outcome is uncertain. Retry later or ask an administrator to inspect the reserved copy; no duplicate was created.'};
+      const candidate=found.next();
+      if(found.hasNext())return {ok:false,code:'create_unknown',message:'More than one pending copy exists. Administrator review required.'};
+      copy=bvlCreateFile_(folderId,templateId,candidate.getId());
+      job.id=copy.getId();props.setProperty(key,JSON.stringify(job));
+    }
+    phase('create_recovered');
+  }else{
+    if(!bvlTypeOptions_(templateId).includes(bvlCanonicalType_(type)))return {ok:false,code:'action_type',message:'Choose a valid action type from the current template.'};
+    phase('create_validated');
+    const temp='BVLOG_CREATE_PENDING_'+requestId;
+    // If the reservation was removed manually but a pending copy remains,
+    // fail closed instead of accidentally copying a second time.
+    if(folder.getFilesByName(temp).hasNext())return {ok:false,code:'create_unknown',message:'An existing pending copy needs administrator review.'};
+    job={v:1,folder:folderId,template:templateId,base:base,temp:temp,phase:'copying',id:''};
+    props.setProperty(key,JSON.stringify(job));
+    phase('create_reserved');
+    const template=DriveApp.getFileById(templateId);
+    copy=template.makeCopy(temp,folder);
+    job.id=copy.getId();props.setProperty(key,JSON.stringify(job));
+    phase('create_copied');
   }
-  const type = bvlSafeText_(payload.type, 60);
-  const place = bvlSafeText_(payload.place, 100);
-  if (!bvlTypeOptions_(templateId).includes(bvlCanonicalType_(type))) return {ok:false,code:'action_type',message:'Choose a valid action type from the current template.'};
-  if (!place || /[\r\n\\/<>]/.test(place)) return {ok:false,code:'place',message:'Location is required; avoid path separators.'};
-  const now = new Date();
-  const base = chosenDate.filename + ' - ' + BVL.DKA + ' - ' + bvlCanonicalType_(type) + ' - ' + place;
-  let name = base, suffix = 2;
-  while (folder.getFilesByName(name).hasNext()) { name = base + ' (' + suffix++ + ')'; }
-  phase('create_validated');
-  const template = DriveApp.getFileById(templateId);
-  const copy = template.makeCopy(name, folder);
-  phase('create_copied');
-  try {
-    const ss = SpreadsheetApp.openById(copy.getId());
-    const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
-    if (!info || !log || !ss.getSheetByName('TECH') || !ss.getSheetByName('TEAM')) {
+  if(job.phase==='copying'){
+    if(copy.getName()!==job.temp)return {ok:false,code:'create_unknown',message:'Pending copy was renamed before initialization. Administrator review required.'};
+    const ss=SpreadsheetApp.openById(copy.getId());
+    const info=ss.getSheetByName('INFO'),log=ss.getSheetByName('LOG');
+    if(!info||!log||!ss.getSheetByName('TECH')||!ss.getSheetByName('TEAM'))
       throw new Error('The template must contain INFO, LOG, TECH, TEAM tabs.');
-    }
     const first=bvlInfoSections_(info)[0];
     const action=first&&first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u0410\u043a\u0446\u0438\u044f'));
     if(!action)throw new Error('Template INFO action type row is missing.');
-    const valueCell=info.getRange(action.fields[0].col+action.row);
-    const valid=bvlValidationAwareSet_(valueCell,bvlCanonicalType_(type));
+    const valid=bvlValidationAwareSet_(info.getRange(action.fields[0].col+action.row),bvlCanonicalType_(type));
     if(!valid.ok)throw new Error(valid.message);
-    // Location remains empty until an operator explicitly records actual GPS/location.
     const placeRow=first.rows.find(r=>bvlNorm_(r.label)===bvlNorm_('\u041b\u043e\u043a\u0430\u0446\u0438\u044f'));
     if(placeRow)info.getRange(placeRow.fields[0].col+placeRow.row).clearContent();
     info.getRange(Math.max(1,first.headerRow-1),Math.min(3,info.getMaxColumns())).setValue(chosenDate.display);
-    log.getRange('D2').setValue(BVL.DATE + ' ' + chosenDate.display);
+    log.getRange('D2').setValue(BVL.DATE+' '+chosenDate.display);
+    phase('create_fields_set');
     bvlPrepare_(ss);
     phase('create_prepared');
     SpreadsheetApp.flush();
     phase('create_flushed');
-    if (idempotentKey) PropertiesService.getScriptProperties().setProperty(idempotentKey,copy.getId());
-    return {ok:true, document:{id:copy.getId(),name:name,created:now.toISOString(),url:copy.getUrl()}};
-  } catch (err) {
-    try {copy.setTrashed(true);}catch(ignore){}
-    throw err;
+    job.phase='prepared';props.setProperty(key,JSON.stringify(job));
   }
+  // Once preparation is recorded, a lost rename or final-property ACK is recoverable.
+  // Never reinitialize a visible document or overwrite its manually edited cells.
+  if(copy.getName()===job.temp){
+    copy.setName(bvlUniqueName_(folder,base));
+    phase('create_published');
+  }
+  props.setProperty(key,copy.getId());
+  phase('create_confirmed');
+  return bvlCreateReply_(copy,wasExisting);
 }
 function bvlEnsureRows_(sheet, lastRowNeeded) {
   if (lastRowNeeded > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), lastRowNeeded - sheet.getMaxRows());
