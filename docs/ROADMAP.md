@@ -76,6 +76,12 @@ Acceptance remains open for real iPhone Safari recording/review and refresh beha
 
 **Performance outcome:** count eliminated document requests and report comparable p50/error-rate changes. Do not promise a fixed percentage before measuring.
 
+### v0.8.0 reliability increment — retry/recovery (Draft, NOT deployed)
+
+A separate frontend retry candidate in `feature/v0.8.0-retry-recovery` addresses [#22](https://github.com/issaev/bg-voice-logger/issues/22) and [#25](https://github.com/issaev/bg-voice-logger/issues/25): three automatic 5/15/30-second retry attempts for transient document reads, bounded and jittered retry for IndexedDB-queued writes with the original `op_id`, capped attempts, visible pending retry state, and safe resume on foreground/online. No new Google Apps Script, PHP or IndexedDB schema. **Actual locked-screen continuous transfer is not guaranteed and remains #27.** This is separate from [Draft PR #21](https://github.com/issaev/bg-voice-logger/pull/21) (GAS profiling).
+
+Local fault injection and regression: **25/35 test files PASS** versus **24/34** main v0.7.2.1, same ten inherited FAIL names, no new failing tests. Browser/Android/iPhone and Google Sheets integration acceptance pending. See [retry/recovery test plan](PLAN_V080_RETRY_BG.md). Production remains v0.7.2.1, and no release is authorized by a Draft PR.
+
 ### v0.8.0 — backend and media changes (needs separate design and approval)
 
 - [ ] Confirm deployed Apps Script version before changing behavior. The **bundled** `bvlRead` can call `bvlRepairPhotoAnchors_` and potentially change embedded image anchors during a read; verify and remove read-side effects before authenticated read-only benchmark tests.
