@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.0.1-b9391cb399e3';
+  const BVLOG_RUNNING_BUILD = '0.8.1-effa0ee0d1ce';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -337,6 +337,33 @@
   function Button({children,onClick,secondary,disabled,className,type}) {
     return h('button',{type:type||'button',className:'bv-btn '+(secondary?'secondary ':'')+(className||''),disabled:!!disabled,onClick:onClick},children);
   }
+  function PhotoSourcePicker({disabled,onFiles,compact}) {
+    const [open,setOpen]=useState(false);
+    const trigger=useRef(null), camera=useRef(null), gallery=useRef(null), first=useRef(null);
+    useEffect(()=>{if(open&&first.current)first.current.focus();},[open]);
+    useEffect(()=>{if(disabled)setOpen(false);},[disabled]);
+    function close(){setOpen(false);if(trigger.current)trigger.current.focus();}
+    function choose(ref){
+      // Native camera/file picker must be invoked in this same user gesture.
+      if(disabled||!ref.current)return;
+      ref.current.click();close();
+    }
+    function picked(e){
+      const files=Array.from(e.target.files||[]);
+      e.target.value='';
+      if(files.length&&!disabled)onFiles(files);
+    }
+    const cls=compact?'bv-attach-inline':'bv-photo-pick';
+    return h('div',{className:'bv-photo-source',onKeyDown:e=>{if(e.key==='Escape'&&open){e.preventDefault();close();}}},
+      h('button',{type:'button',className:cls,disabled:disabled,ref:trigger,'aria-expanded':open,
+        onClick:()=>setOpen(v=>!v)},icon('image',16),' Добави снимка'),
+      h('input',{ref:gallery,type:'file',accept:'image/*',multiple:true,disabled:disabled,hidden:true,onChange:picked}),
+      h('input',{ref:camera,type:'file',accept:'image/*',capture:'environment',disabled:disabled,hidden:true,onChange:picked}),
+      open&&!disabled&&h('div',{className:'bv-photo-source-menu',role:'group','aria-label':'Добавяне на изображение'},
+        h('button',{type:'button',ref:first,onClick:()=>choose(camera)},icon('camera',17),' Снимай'),
+        h('button',{type:'button',onClick:()=>choose(gallery)},icon('image',17),' От галерията'),
+        h('button',{type:'button',onClick:close},'Отказ')));
+  }
   // A Google popup may take longer than the login cookie lifetime. Obtain
   // the challenge immediately before exchanging the credential. One bounded
   // retry is safe only for an explicit challenge rejection, before JWT verification.
@@ -436,7 +463,25 @@
     const [actionTypes,setActionTypes]=useState(TYPES);
     const [newPlace,setNewPlace]=useState('');
     const [incidentDate,setIncidentDate]=useState(sofiaTodayISO);
-    const [createId,setCreateId]=useState(uuid());
+    const [pendingCreate,setPendingCreate]=useState(null);
+    const createPendingRef=useRef(null),createFlightRef=useRef(false),createScopeRef=useRef(0);
+    function restorePendingCreate(){
+      let saved=null;
+      try{saved=JSON.parse(localStorage.getItem(localCacheKey('pending-create'))||'null');}catch(ignore){}
+      if(!saved||!(/^[a-f0-9-]{32,50}$/i.test(saved.create_id||''))||
+        typeof saved.type!=='string'||typeof saved.place!=='string'||!isIncidentDate(saved.incident_date))saved=null;
+      createPendingRef.current=saved;setPendingCreate(saved);
+      if(saved){setNewType(saved.type);setNewPlace(saved.place);setIncidentDate(saved.incident_date);setCreating(true);}
+      return saved;
+    }
+    function clearPendingCreate(scopeKey,id){
+      try{const saved=JSON.parse(localStorage.getItem(scopeKey)||'null');
+        if(saved&&saved.create_id===id)localStorage.removeItem(scopeKey);
+      }catch(ignore){}
+      if(scopeKey===localCacheKey('pending-create')&&createPendingRef.current?.create_id===id){
+        createPendingRef.current=null;setPendingCreate(null);
+      }
+    }
     const [selectedDoc,setSelectedDoc]=useState('');
     const docsRequestRef=useRef(0);
     const selectedDocRef=useRef('');
@@ -730,7 +775,8 @@
     async function googleLogout(){
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
-      docsRequestRef.current++;
+      docsRequestRef.current++;documentRequestRef.current++;docRef.current=null;createScopeRef.current++;
+      createPendingRef.current=null;setPendingCreate(null);setCreating(false);
       selectedDocRef.current='';selectedDocManualRef.current=false;
       CFG.csrf='';setAuth(null);setMode('choose');setDoc(null);setData(null);setDocs([]);setSelectedDoc('');setQueueOpen(false);setQueue([]);
       try{localStorage.removeItem('bvlog-last-identity');}catch(e){}
@@ -764,6 +810,7 @@
           setSelectedDoc(selectedDocRef.current);
         }
       } catch(e) {setDocs([]);if(!selectedDocManualRef.current){selectedDocRef.current='';setSelectedDoc('');}}
+      restorePendingCreate();
       await refreshQueue();
       requestBackgroundSync();
     }
@@ -822,7 +869,7 @@
         setDocs(fresh);
         if(Array.isArray(r.action_types) && r.action_types.length){
           const types=r.action_types.filter(x=>typeof x==='string' && x.length && x!==B('Izberi ot menyuto'));
-          if(types.length){setActionTypes(types);setNewType(old=>types.includes(old)?old:types[0]);}
+          if(types.length){setActionTypes(types);if(!createPendingRef.current)setNewType(old=>types.includes(old)?old:types[0]);}
         }
         // A user choice made during an in-flight request is never replaced with the latest incident.
         const chosen=selectedDocRef.current;
@@ -940,23 +987,46 @@
       setDoc(chosen); docRef.current=chosen;
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
       setPage('LOG');setMode('session');setData(null);setError('');setSecondInfo(false);setLastFreshAt('');
-      localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));
+      try{localStorage.setItem(localCacheKey('last-doc'),JSON.stringify(chosen));}catch(ignore){}
       await loadDocument(chosen.id);
       if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(()=>{});
     }
     async function newDocument() {
-      if (!newPlace.trim() || !checkOperatorName()) return;
-      if(!isIncidentDate(incidentDate)){setError('Избери валидна дата на акцията.');return;}
-      setBusy(true);setError('');
-      try {
-        const r=await api('documents','POST',{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:createId});
-        if (!r.ok) throw new Error(r.message||'Create failed');
-        await loadDocs();
-        selectExistingDocument(r.document.id);
-        setCreating(false);setCreateId(uuid());
+      if(createFlightRef.current||!checkOperatorName())return;
+      const scope=DB,generation=createScopeRef.current,key=localCacheKey('pending-create');
+      const current=()=>scope===DB&&generation===createScopeRef.current;
+      const saved=restorePendingCreate();
+      if(!saved&&(!newPlace.trim()||!isIncidentDate(incidentDate))){setError('Въведи място и валидна дата на акцията.');return;}
+      const payload=saved||{type:newType,place:newPlace.trim(),incident_date:incidentDate,create_id:uuid()};
+      // Persist before contacting Google. Refresh/retry uses the exact same ID and payload.
+      try{localStorage.setItem(key,JSON.stringify(payload));}
+      catch(e){setError('Не може да се запази идентификаторът за безопасно създаване. Провери локалното съхранение.');return;}
+      createPendingRef.current=payload;setPendingCreate(payload);
+      createFlightRef.current=true;setBusy(true);setError('');
+      try{
+        const r=await api('documents','POST',payload);
+        if(!r.ok){
+          if(['action_type','place','invalid_date','create_id','configuration'].includes(r.code))clearPendingCreate(key,payload.create_id);
+          throw new Error(r.message||'Create failed');
+        }
+        if(!r.document||!r.document.id)throw new Error('Липсва потвърден идентификатор на акцията.');
+        clearPendingCreate(key,payload.create_id);
+        if(!current())return;
+        // CREATE already returns the authorized document. Do not await a full folder LIST.
+        docsRequestRef.current++;setDocsLoading(false);
+        setDocs(old=>[r.document,...old.filter(d=>d.id!==r.document.id)]);
+        try{
+          const cache=JSON.parse(localStorage.getItem(localCacheKey('docs'))||'[]');
+          const previous=Array.isArray(cache)?cache:[];
+          localStorage.setItem(localCacheKey('docs'),JSON.stringify([r.document,...previous.filter(d=>d.id!==r.document.id)]));
+        }catch(ignore){}
+        selectExistingDocument(r.document.id);setCreating(false);
+        // The LOG shell becomes usable immediately after acknowledged creation;
+        // its existing full READ populates actual server values without blocking LIST.
         await startSession(r.document);
-      } catch(e) { setError(e.message); }
-      finally { setBusy(false); }
+      }catch(e){
+        if(current())setError(e.message+(createPendingRef.current?' · Опитай отново със същата заявка; не създавай дубликат.':''));
+      }finally{createFlightRef.current=false;setBusy(false);}
     }
     async function enqueue(op) {
       const item=Object.assign({op_id:uuid(),state:'pending',created:new Date().toISOString(),author:ANONYMOUS ? operatorName.trim() : ((authRef.current && authRef.current.name) || (CFG.user && CFG.user.name || ''))},op);
@@ -2002,22 +2072,6 @@
         'Необходим е WordPress вход.', h('a',{href:'/wp-login.php?redirect_to='+encodeURIComponent(location.href)},'Вход'))) :
       mode==='choose' ? h('main',{className:'bv-content'},
         h('div',{className:'bv-headline'},h('h1',null,B('Izbor na aktsiya')),h('p',null,B('Izberi dokument ili sqzday nov ot shablona.'))),
-        !installedPwa&&h('section',{className:'bv-card bv-install-card','aria-label':'Инсталиране на приложението'},
-          h('button',{type:'button',className:'bv-install-btn',onClick:installOnPhone,
-            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},
-            icon('download',18),' Инсталирай приложението на телефона'),
-          h('p',{className:'bv-install-caption'},installReady?
-            'Браузърът може да предложи инсталиране с един бутон.':
-            'Добави пряк път като приложение на началния екран.'),
-          installStatus&&h('p',{className:'bv-install-status',role:'status'},installStatus),
-          installHelpOpen&&h('div',{id:'bvlog-install-help',className:'bv-install-help',role:'region',
-            'aria-label':'Инструкции за инсталиране'},
-            iosInstallDevice() ?
-              h('p',null,'На iPhone/iPad: отвори страницата в Safari, натисни „Споделяне“ (Share), избери „Добави към началния екран“ (Add to Home Screen), включи „Отваряне като приложение“ ако се показва и натисни „Добави“.') :
-              androidInstallDevice() ?
-                h('p',null,'На Android: отвори страницата в Chrome, натисни менюто ⋮, после „Инсталиране на приложението“ или „Добавяне към началния екран“. Ако опцията липсва, провери дали сайтът е отворен през HTTPS в браузър.') :
-                h('p',null,'Отвори приложението на телефона. В Android Chrome избери ⋮ → Инсталиране; на iPhone Safari избери Споделяне → Добави към началния екран.'),
-            h('button',{type:'button',className:'bv-install-help-close',onClick:()=>setInstallHelpOpen(false)},'Скрий инструкциите'))),
         ANONYMOUS&&h('div',{className:'bv-card bv-operator-card'},
           h('label',null,B('Ime na operatora'),
             h('input',{className:'bv-input',type:'text',autoComplete:'name',value:operatorName,maxLength:80,required:true,placeholder:B('Dve imena'),onChange:e=>changeOperatorName(e.target.value)})),
@@ -2037,17 +2091,31 @@
           }},icon('arrow',18),' ',B('Otvori aktsiyata'))),
         h('div',{className:'bv-or'},B('ILI')),
         h('div',{className:'bv-card'},
-          h('button',{className:'bv-row spread bv-switch',onClick:()=>{if(!creating)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
+          h('button',{className:'bv-row spread bv-switch',disabled:busy,onClick:()=>{if(!creating&&!pendingCreate)setIncidentDate(sofiaTodayISO());setCreating(!creating);}},h('strong',null,B('Sqzday nova aktsiya')),icon(creating?'close':'plus',20)),
           creating&&h('div',{className:'bv-form'},
-            h('label',null,B('Tip aktsiya'),h('select',{value:newType,onChange:e=>{setNewType(e.target.value);setCreateId(uuid());},className:'bv-input'},actionTypes.map(v=>h('option',{key:v,value:v},v)))),
-            h('label',null,B('Naseleno myasto'),h('input',{className:'bv-input',value:newPlace,maxLength:100,placeholder:B('napr. gr. Samokov'),onChange:e=>{setNewPlace(e.target.value);setCreateId(uuid());}})),
+            h('label',null,B('Tip aktsiya'),h('select',{value:newType,disabled:busy||!!pendingCreate,onChange:e=>setNewType(e.target.value),className:'bv-input'},Array.from(new Set([...(pendingCreate?[pendingCreate.type]:[]),...actionTypes])).map(v=>h('option',{key:v,value:v},v)))),
+            h('label',null,B('Naseleno myasto'),h('input',{className:'bv-input',value:newPlace,maxLength:100,placeholder:B('napr. gr. Samokov'),disabled:busy||!!pendingCreate,onChange:e=>setNewPlace(e.target.value)})),
             h('label',null,'Дата на акцията',h('input',{className:'bv-input',type:'date',value:incidentDate,
-              onChange:e=>{setIncidentDate(e.target.value);setCreateId(uuid());},required:true})),
+              onChange:e=>setIncidentDate(e.target.value),disabled:busy||!!pendingCreate,required:true})),
             h('div',{className:'bv-preview'},B('Ime na dokumenta')+': ',(incidentDate||'YYYY-MM-DD').replaceAll('-','.'),' - ',B('DKA'),' - ',newType,' - ',newPlace||'...'),
-            h(Button,{disabled:busy||!newPlace.trim()||!isIncidentDate(incidentDate)||!online,onClick:newDocument},busy?B('Sqzdava se...'):B('Sqzday i otvori')))),
+            pendingCreate&&h('p',{className:'bv-muted',role:'status'},'Има започната заявка. Повтори безопасно същата акция, докато получиш потвърждение.'),
+            h(Button,{disabled:busy||(!pendingCreate&&(!newPlace.trim()||!isIncidentDate(incidentDate)))||!online,onClick:newDocument},busy?B('Sqzdava se...'):pendingCreate?'Провери / повтори създаването':B('Sqzday i otvori')))),
         !online&&h('div',{className:'bv-card bv-offline-last'},h('p',null,B('Oflayn: mozhe da prodqlzhish poslednata aktsiya.')),
           h(Button,{secondary:true,onClick:()=>{try{const d=JSON.parse(localStorage.getItem(localCacheKey('last-doc'))||'null');if(d)startSession(d);}catch(e){}}},B('Posledna aktsiya'))),
-        queueAccessible&&h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж')
+        queueAccessible&&h('button',{className:'bv-queue-link',onClick:()=>setQueueOpen(true)},icon('clock',16),waiting+' '+B('neizprateni operatsii'),' · Виж'),
+        !installedPwa&&h('section',{className:'bv-install-footer','aria-label':'Инсталиране на приложението'},
+          h('button',{type:'button',className:'bv-install-btn',onClick:installOnPhone,
+            'aria-label':'Инсталирай приложението на телефона',title:'Инсталирай приложението на телефона',
+            'aria-expanded':installHelpOpen,'aria-controls':'bvlog-install-help'},icon('download',20)),
+          installStatus&&h('p',{className:'bv-install-status',role:'status'},installStatus),
+          installHelpOpen&&h('div',{id:'bvlog-install-help',className:'bv-install-help',role:'region',
+            'aria-label':'Инструкции за инсталиране'},
+            iosInstallDevice() ?
+              h('p',null,'На iPhone/iPad: отвори страницата в Safari, натисни „Споделяне“ (Share), избери „Добави към началния екран“ (Add to Home Screen), включи „Отваряне като приложение“ ако се показва и натисни „Добави“.') :
+              androidInstallDevice() ?
+                h('p',null,'На Android: отвори страницата в Chrome, натисни менюто ⋮, после „Инсталиране на приложението“ или „Добавяне към началния екран“. Ако опцията липсва, провери дали сайтът е отворен през HTTPS в браузър.') :
+                h('p',null,'Отвори приложението на телефона. В Android Chrome избери ⋮ → Инсталиране; на iPhone Safari избери Споделяне → Добави към началния екран.'),
+            h('button',{type:'button',className:'bv-install-help-close',onClick:()=>setInstallHelpOpen(false)},'Скрий инструкциите')))
       ) : h('main',{className:'bv-content bv-session'},
         h('div',{className:'bv-action-top'},
           h('div',null,h('span',{className:'bv-kicker'},B('AKTIVNA AKTSIYA')),h('h1',null,title),
@@ -2109,10 +2177,7 @@
               h('textarea',{value:draft,onChange:e=>setDraft(e.target.value),rows:2,maxLength:3000,placeholder:B('Vqvedi sqbitie...')}),
               h('button',{onClick:submitText,disabled:!draft.trim(),title:B('Zapishi')},icon('arrow',20)))),
           h('div',{className:'bv-photo-tools'},
-            h('label',{className:'bv-photo-pick'},icon('image',17),' Качи снимка',
-              h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
-            h('label',{className:'bv-photo-pick'},icon('camera',17),' Снимай',
-              h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{onSelectPhotos(e.target.files);e.target.value='';}})),
+            h(PhotoSourcePicker,{disabled:photoBusy,onFiles:onSelectPhotos}),
             photoBusy&&h('small',null,'Обработва снимката...'),
             photos.length>0&&h('button',{className:'bv-photo-pick',onClick:submitPhotoOnly},icon('upload',16),' Запиши само снимка'),
             photos.map((p,i)=>h('span',{className:'bv-photo-chip',key:i},
@@ -2132,11 +2197,12 @@
                 return h('div',{className:'bv-event bv-local-event',key:item.key},
                   h('span',{className:'bv-event-time'},timeOf(o.event_at||o.created)),
                   h('div',{className:'bv-event-body'},
-                    h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
+                    h('div',{className:'bv-event-main'},h('strong',null,o.text||o.transcript||'Гласов запис — очаква транскрипция'),
                     o.state==='synced'?
                       h('span',{className:'bv-status wait'},icon('refresh',14),
                         'Записано в Google · очаква опресняване'):
-                      h(EntryStatus,{status:o.state,retryAt:o.next_retry}),
+                      h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
+                    h('div',{className:'bv-event-controls'},
                     (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
                     playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
                       icon('play',15),' Чуй оригинала'),
@@ -2147,7 +2213,7 @@
                     o.state==='error'&&h(Button,{secondary:true,onClick:async()=>{
                       await database('put','queue',Object.assign({},o,{state:'pending'}));
                       await refreshQueue();syncAll();
-                    }},'Повтори изпращането')));
+                    }},'Повтори изпращането'))));
               }
               const x=item.remote;
               const c=x.cells,divider=String(c[3]||'').startsWith('ДАТА:');
@@ -2156,21 +2222,18 @@
               return h('div',{className:'bv-event '+(cancelled?'bv-event-cancelled':''),key:item.key},
                 h('span',{className:'bv-event-time'},c[1]||'--:--'),
                 h('div',{className:'bv-event-body'},
-                  h('strong',null,c[3]||''),
+                  h('div',{className:'bv-event-main'},h('strong',null,c[3]||''),
                   h('small',null,(cancelled?'АНУЛИРАНО · ':'')+(c[2]||'')+(c[4]?' | '+c[4]:'')),
                   !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
-                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано'),
-                  h('div',{className:'bv-event-photos'},
+                    h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано')),
+                  h('div',{className:'bv-event-controls'},h('div',{className:'bv-event-photos'},
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
                       icon('image',16),' Снимки (',(x.photos||[]).length,')'),
                     x.audio&&h('button',{type:'button',className:'bv-photo-indicator',
                       disabled:audioBusy===x.audio.id,onClick:()=>playRemoteAudio(x)},icon('play',15),
                       audioBusy===x.audio.id?' Зарежда аудиото...':' Чуй оригинала'),
-                    !cancelled&&h('label',{className:'bv-attach-inline'},icon('image',15),' От галерията',
-                      h('input',{type:'file',accept:'image/*',multiple:true,disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
-                    !cancelled&&h('label',{className:'bv-attach-inline bv-attach-camera'},icon('camera',15),' Снимай',
-                      h('input',{type:'file',accept:'image/*',capture:'environment',disabled:photoBusy,onChange:e=>{uploadExistingPhoto(x,e.target.files);e.target.value='';}})),
+                    !cancelled&&h(PhotoSourcePicker,{compact:true,disabled:photoBusy,onFiles:files=>uploadExistingPhoto(x,files)}),
                     !cancelled&&h('button',{type:'button',className:'bv-event-menu-button',
                       'aria-label':'Действия за събитието','aria-expanded':eventMenu===x.row,
                       onClick:()=>setEventMenu(eventMenu===x.row?null:x.row)},icon('more',20))),
@@ -2181,7 +2244,7 @@
                     h('button',{type:'button',onClick:()=>setExpandedHistory(expandedHistory===x.row?null:x.row)},
                       'История на промените ('+x.history.length+')'),
                     expandedHistory===x.row&&x.history.map((v,i)=>h('small',{key:i},
-                      (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||''))))));
+                      (v.at||'')+' · '+(v.author||'')+' · '+(v.action==='cancel'?'Анулиране':'Редакция')+': '+(v.before||'')+' → '+(v.after||'')))))));
             }),
             data&&!journalFeed.length&&!docLoading&&h('p',{className:'bv-muted'},B('Oshte nyama zapisi.')))
 
