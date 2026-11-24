@@ -1,6 +1,6 @@
-# BG Voice Logger v0.7.1 — reliability release candidate (DRAFT)
+# BG Voice Logger v0.7.1 — release and upgrade notes
 
-**Status:** source-only development branch; NOT deployed. **Approval is required** before merging into main, upgrading WordPress, or publishing Google Apps Script.
+**Status (2026-11-24):** Operator reports WordPress v0.7.1 / JS build `0.7.1-3d2b0c59217f` deployed in production. [PR #13](https://github.com/issaev/bg-voice-logger/pull/13) is merged into `main`. A read-only check matched public JavaScript to the installed copy, and 8/8 isolated regression tests passed. Actual deployed Apps Script revision and full iPhone/Google Sheets end-to-end validation remain unverified. GitHub merge did not deploy any code.
 
 ## Scope
 
@@ -43,7 +43,7 @@ php tests/test-v070-assets.php
 
 On the working source, these targeted checks pass. Full historical test suite: **17/27 pass**, **10 historical failures**, same failing test names as the v0.7.0 baseline (**16/26 pass**). Do not interpret an obsolete historical assertion as a new v0.7.1 regression. New v0.7.1 regression test does pass.
 
-### Mandatory hands-on validation BEFORE permission to publish
+### Outstanding hands-on acceptance after the reported production deployment
 
 1. **iPhone Safari smoke test:** preserve currently working microphone recording, original playback, cloud STT, offline queue, reconnect and manual transcript review. Collect actual iOS/browser version. No evidence currently establishes an active Safari problem.
 2. **Incident choice race:** with a slow list refresh pending, select an older incident and verify selection remains there after response; open and verify the sheet name/ID before the first LOG entry.
@@ -54,7 +54,7 @@ On the working source, these targeted checks pass. Full historical test suite: *
 
 The isolated Node tests are NOT real-device Safari tests, and the bundled Code.gs may differ from the currently deployed Apps Script. Verify the deployed revision before upgrading.
 
-## Deployment order (AFTER explicit approval ONLY)
+## Deployment / redeployment order (only after separate explicit approval)
 
 1. Back up the active WordPress plugin, WordPress config values, current Apps Script deployed revision, and a safe test incident; document current JS build ID and backend version. Do **not** export real incident data into a public GitHub repo.
 2. Verify the existing WordPress PHP runtime/settings and deployed Apps Script source; do not replace private defaults with the sanitized public placeholders.
