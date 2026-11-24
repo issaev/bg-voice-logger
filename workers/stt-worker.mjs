@@ -8,8 +8,9 @@ const MAX_UPLOAD = 8 * 1024 * 1024;
 const FALLBACK_MAX = 2 * 1024 * 1024;
 const STT_MODEL = '@cf/openai/whisper-large-v3-turbo';
 const GROQ_ENDPOINT = 'https://api.groq.com/openai/v1/audio/transcriptions';
-// Deliberately omit a verbose prompt: Whisper can hallucinate its own hints on silence.
-const CONTEXT = '';
+// Reviewed Bulgarian SAR vocabulary, below Whisper's 224-token prompt limit.
+// Only a spelling hint, never an instruction to invent words or transcribe silence.
+const CONTEXT = "Спасителна акция. Термини: Алфа, Браво, Чарли, офроуд, ДКА, НИМ, ЕТА, CalTopo, ретранслатор, САК, К9, СКБ, ПСС, чекпойнт, трак, Селимица, Черни връх, Боерица, Кумата, Алеко, щаб, разчистване, издирване, обход, заслон, сборен пункт, доброволец, маршрут, екипировка, отводняване, евакуация, резачка, шланг, смукател.";
 const HALLUCINATED_CONTEXT = 'сар к9 caltopo витоша сектор екип алфа координати сборен пункт';
 const encoder = new TextEncoder();
 
@@ -64,6 +65,36 @@ function encodeBase64(buffer) {
   for(let i=0;i<bytes.length;i+=8192)binary+=String.fromCharCode(...bytes.subarray(i,i+8192));
   return btoa(binary);
 }
+// Normalize Cyrillic, Latin, numbers and punctuation before comparing to the hint.
+function normalizeEcho(value) {
+  return String(value||'').toLocaleLowerCase('bg-BG')
+    .replace(/[^\p{L}\p{N}]+/gu,' ').replace(/\s+/g,' ').trim();
+}
+// Reject glossary recitation rather than presenting it as actual radio traffic.
+// A couple of matching SAR terms are expected in legitimate speech and are NOT rejected.
+function promptEcho(text,prompt) {
+  const value=normalizeEcho(text),hint=normalizeEcho(prompt);
+  if(!value || !hint)return false;
+  if(value.includes('спасителна акция термини'))return true;
+  if(value===hint || (value.length>=40 && hint.includes(value)))return true;
+  const terms=String(prompt).split(':').slice(1).join(':').split(',')
+    .map(normalizeEcho).filter(Boolean);
+  const wrapped=' '+value+' ';
+  let matches=0;
+  for(const term of terms)if(wrapped.includes(' '+term+' '))matches++;
+  if(matches>=6 && value.split(' ').length<=matches*2.5)return true;
+  for(let i=0;i<=terms.length-5;i++){
+    if(wrapped.includes(' '+terms.slice(i,i+5).join(' ')+' '))return true;
+  }
+  return false;
+}
+// These Groq verbose_json indicators are only a conservative all-segments filter.
+// Do not discard legitimate speech because one segment alone is noisy.
+function segmentsIndicateSilence(segments) {
+  return Array.isArray(segments)&&segments.length>0&&segments.every(s=>
+    typeof s.no_speech_prob==='number'&&s.no_speech_prob>0.6&&
+    typeof s.avg_logprob==='number'&&s.avg_logprob< -1.0);
+}
 /** Quality flags indicate review, never a calibrated probability of transcription correctness. */
 function transcriptQuality(text, segments, duration, micActivity, prompt = '') {
   const reasons = [];
@@ -72,7 +103,7 @@ function transcriptQuality(text, segments, duration, micActivity, prompt = '') {
   const tokens = plain.split(' ').filter(Boolean);
   const matching = legacy.filter(x => tokens.includes(x)).length;
   if (matching >= 5 && tokens.length <= 35) reasons.push('prompt_echo');
-  if (prompt && plain === prompt.toLocaleLowerCase('bg-BG').trim()) reasons.push('prompt_echo');
+  if (prompt && promptEcho(text,prompt)) reasons.push('prompt_echo');
   if (/\b(.{5,35})\s+\1\s+\1\b/iu.test(plain)) reasons.push('repetition');
   if (tokens.length>=7 && new Set(tokens).size <= Math.max(2,Math.floor(tokens.length*0.25))) reasons.push('repetition');
   const segs = Array.isArray(segments)?segments:[];
@@ -98,6 +129,7 @@ async function viaGroq(file, env, micActivity) {
   form.append('file',file,'recording'+asExtension(file.type));
   form.append('model','whisper-large-v3');
   form.append('language','bg');
+  form.append('prompt',CONTEXT);
   form.append('response_format','verbose_json');
   form.append('temperature','0');
   try {
@@ -112,7 +144,11 @@ async function viaGroq(file, env, micActivity) {
     const v=await r.json();
     const text=typeof v.text==='string'?v.text.trim():'';
     if(!text)return {ok:false,fallback:false,code:'no_speech'};
-    const quality=transcriptQuality(text,v.segments,v.duration,micActivity);
+    const quality=transcriptQuality(text,v.segments,v.duration,micActivity,CONTEXT);
+    // No invented glossary or all-silent segment transcript may reach LOG/review.
+    // A no_speech response leaves the original recording available on the device.
+    if(quality.reasons.includes('prompt_echo')||segmentsIndicateSilence(v.segments))
+      return {ok:false,fallback:false,code:'no_speech'};
     return {ok:true,text,provider:'groq',model:'whisper-large-v3',quality};
   }catch(e){return {ok:false,fallback:true,code:'groq_transport'};}
 }
@@ -125,8 +161,10 @@ async function viaCloudflare(file,env,micActivity) {
       condition_on_previous_text:false
     });
     const text=typeof result?.text==='string'?result.text.trim():'';
-    return text?{ok:true,text,provider:'cloudflare',model:STT_MODEL,quality:transcriptQuality(text,[],undefined,micActivity)}
-      :{ok:false,code:'no_speech'};
+    if(!text)return {ok:false,code:'no_speech'};
+    const quality=transcriptQuality(text,[],undefined,micActivity,CONTEXT);
+    if(quality.reasons.includes('prompt_echo'))return {ok:false,code:'no_speech'};
+    return {ok:true,text,provider:'cloudflare',model:STT_MODEL,quality};
   }catch(e){return {ok:false,code:'cloudflare_unavailable'};}
 }
 export default {
@@ -135,7 +173,7 @@ export default {
     const allowed=String(env.ALLOWED_ORIGIN||'');
     const endpoint=new URL(request.url);
     if(endpoint.pathname==='/health' && request.method==='GET') {
-      return json({ok:true,version:'0.6.0',primary:!!env.GROQ_API_KEY,
+      return json({ok:true,version:'0.6.1',prompt_profile:'sar-bg-v1',primary:!!env.GROQ_API_KEY,
         fallback:!!env.AI,nonce_storage:!!env.STT_NONCES},200,'');
     }
     if(endpoint.pathname!=='/stt/transcribe')return json({ok:false,code:'not_found'},404);

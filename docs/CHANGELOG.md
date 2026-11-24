@@ -1,3 +1,15 @@
+## v0.8.0-A — GAS read profiling and bounded scans (DRAFT, NOT DEPLOYED)
+- Staging-only guarded Apps Script runner and Node comparator; both refuse to print document IDs/cell content. Test workbook must be named `BVLOG_BENCHMARK_*` and explicitly enabled via staging Script Properties.
+- Staging execution not performed; Google Drive connector returned HTTP 429 on a subsequent metadata request. Local suite now 27/37 vs 23/33 baseline; same ten historical failures.
+- [Staging instructions](STAGING_TEST_V080A_BG.md).
+- Replace unbounded last-operational-row scans with backward windows, starting at 256 and growing to at most 4096 rows per Google Sheets read.
+- Reuse existing Drive file name and Sheet tab handles in `bvlRead_` without weakening folder checks, data shape or old media mappings.
+- Emit safe request correlation plus separate `phase_ms` and `elapsed_ms` for read/list/write stages and serialized responses. Trace lock wait separately from Sheets work.
+- Add `tools/analyze-gas-traces.mjs` for aggregate redacted log analysis and synthetic golden equivalence test fixtures.
+- **25/35 isolated test files PASS** vs **23/33** v0.7.2.1; the same ten historical failures, no new failing file names. No production speed measurement.
+- Google Apps Script draft identifies itself as `0.8.0-a1`. WordPress, STT, IndexedDB and private configuration are unchanged. Audio streaming #7 remains future work.
+- [Staging, instrumentation and rollback instructions](PLAN_V080A_BG.md).
+
 ## v0.7.2.1 — Reliability & continuous voice LOG hotfix (operator-reported production 2026-11-24; acceptance pending)
 - #18: render each dictated LOG event continuously through audio/STT/review/pending/sending/synced/server echo with one stable op_id and no duplicate/flicker.
 - #17: distinct incident-list, document-read, sync and local persistence errors; a successful read cannot mask unrelated unsaved audio. Keep last confirmed data on read failure.

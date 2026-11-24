@@ -1,5 +1,5 @@
 /**
- * BG Voice Logger - Google Apps Script bridge v0.7.2.
+ * BG Voice Logger - Google Apps Script bridge v0.8.0-a1 (draft).
  * Deploy as Web App: Execute as Me, access Anyone. HTTPS access is protected
  * by a long random shared secret kept only in WordPress and Script Properties.
  * Never put this secret into browser JavaScript or a public spreadsheet.
@@ -26,12 +26,28 @@ const BVL = {
 
 // Emit only a short random request identifier, a fixed action name, phase and
 // elapsed time. Never log payloads, document IDs, names, secrets or transcripts.
-function bvlTrace_(requestId, action, stage, started) {
+function bvlTrace_(requestId, action, stage, started, phaseMs) {
   const rid=/^[a-f0-9]{12}$/.test(String(requestId||'')) ? String(requestId) : 'untracked';
   const act=['read','list','operation','create','audio_read','photo_read','ping'].includes(action)
     ? action : 'other';
-  try { console.log(JSON.stringify({request_id:rid,action:act,stage:stage,
-    elapsed_ms:Math.max(0,Date.now()-started)})); } catch(ignore) {}
+  const safeStage=/^[a-z0-9_]{1,48}$/.test(String(stage||'')) ? stage : 'untracked';
+  const report={request_id:rid,action:act,stage:safeStage,
+    elapsed_ms:Math.max(0,Date.now()-started)};
+  if(Number.isFinite(phaseMs) && phaseMs>=0)report.phase_ms=Math.floor(phaseMs);
+  try { console.log(JSON.stringify(report)); } catch(ignore) {}
+}
+
+// A phase represents the time spent since the previous marker, in addition to
+// cumulative elapsed time. Each tracer is local to one Apps Script execution.
+// Its stage names are fixed code literals; never attach user or sheet content.
+function bvlPhaseTracer_(requestId, action) {
+  const started=Date.now();
+  let previous=started;
+  return function(stage) {
+    const now=Date.now();
+    bvlTrace_(requestId,action,stage,started,Math.max(0,now-previous));
+    previous=now;
+  };
 }
 
 function doPost(e) {
@@ -55,7 +71,9 @@ function doPost(e) {
   } finally {
     bvlTrace_(traceId,traceAction,result&&result.ok===false?'completed_error':'completed',start);
   }
-  return ContentService.createTextOutput(JSON.stringify(result)).setMimeType(ContentService.MimeType.JSON);
+  const json=JSON.stringify(result);
+  bvlTrace_(traceId,traceAction,'response_serialized',start);
+  return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
 function bvlDispatch_(request) {
@@ -68,18 +86,26 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.7.2'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.0-a1'};
   }
-  if (action === 'list') return bvlList_(folderId, templateId);
+  if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id);
   if (action === 'photo_read') return bvlPhotoRead_(folderId, templateId, payload);
   if (action === 'audio_read') return bvlAudioRead_(folderId, templateId, payload);
   if (action === 'create' || action === 'operation') {
+    // The write lock is not involved in read operations. Log its wait
+    // separately to distinguish busy writes from slow Sheets/Drive calls.
+    const requestStart=Date.now();
+    bvlTrace_(request.request_id,action,'lock_wait_start',requestStart);
     const lock = LockService.getScriptLock();
-    if (!lock.tryLock(25000)) return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
+    if (!lock.tryLock(25000)) {
+      bvlTrace_(request.request_id,action,'lock_busy',requestStart);
+      return {ok:false, code:'busy', message:'Google is processing another operator; retry safely.'};
+    }
+    bvlTrace_(request.request_id,action,'lock_acquired',requestStart);
     try {
-      if (action === 'create') return bvlCreate_(folderId, templateId, payload);
-      return bvlOperation_(folderId, templateId, payload);
+      if (action === 'create') return bvlCreate_(folderId, templateId, payload, request.request_id);
+      return bvlOperation_(folderId, templateId, payload, request.request_id);
     } finally { lock.releaseLock(); }
   }
   return {ok:false, code:'unsupported_action', message:'Unsupported bridge action.'};
@@ -110,7 +136,7 @@ function bvlIncidentDate_(raw) {
     throw new Error('Invalid incident calendar day.');
   return {filename:match[1]+'.'+match[2]+'.'+match[3],display:match[3]+'.'+match[2]+'.'+match[1]};
 }
-function bvlDoc_(folderId, templateId, docId) {
+function bvlDoc_(folderId, templateId, docId, metadata) {
   if (!bvlValidId_(docId) || docId === templateId) throw new Error('Invalid operation document.');
   const file = DriveApp.getFileById(docId);
   if (file.getMimeType() !== BVL.MIME || file.isTrashed()) throw new Error('Not a live Google spreadsheet.');
@@ -118,9 +144,14 @@ function bvlDoc_(folderId, templateId, docId) {
   let inFolder = false;
   while (parents.hasNext()) if (parents.next().getId() === folderId) inFolder = true;
   if (!inFolder) throw new Error('This spreadsheet does not belong to the configured folder.');
+  // Reuse the already-authorized Drive handle instead of looking up the file
+  // again when a read needs its name. The optional argument is read-only output.
+  if(metadata)metadata.name=file.getName();
   return SpreadsheetApp.openById(docId);
 }
-function bvlList_(folderId, templateId) {
+function bvlList_(folderId, templateId, requestId) {
+  const phase=bvlPhaseTracer_(requestId,'list');
+  phase('list_start');
   const folder = DriveApp.getFolderById(folderId);
   const iter = folder.getFilesByType(MimeType.GOOGLE_SHEETS);
   const files = [];
@@ -131,7 +162,10 @@ function bvlList_(folderId, templateId) {
     if (files.length >= 250) break;
   }
   files.sort((a,b) => b.created.localeCompare(a.created));
-  return {ok:true, documents:files, action_types:bvlTypeOptions_(templateId)};
+  phase('list_files_loaded');
+  const types=bvlTypeOptions_(templateId);
+  phase('list_types_loaded');
+  return {ok:true, documents:files, action_types:types};
 }
 /** Schema adapters. A spreadsheet copied from a template remains user-editable. */
 function bvlNorm_(text) {
@@ -295,7 +329,9 @@ function bvlInfoAddRow_(ss,p) {
   return {ok:true,row:insertAt,role:role,section:section.section};
 }
 
-function bvlCreate_(folderId, templateId, payload) {
+function bvlCreate_(folderId, templateId, payload, traceId) {
+  const phase=bvlPhaseTracer_(traceId,'create');
+  phase('create_start');
   const folder = DriveApp.getFolderById(folderId);
   const requestId = String(payload.create_id || '');
   const chosenDate=bvlIncidentDate_(payload.incident_date);
@@ -317,8 +353,10 @@ function bvlCreate_(folderId, templateId, payload) {
   const base = chosenDate.filename + ' - ' + BVL.DKA + ' - ' + bvlCanonicalType_(type) + ' - ' + place;
   let name = base, suffix = 2;
   while (folder.getFilesByName(name).hasNext()) { name = base + ' (' + suffix++ + ')'; }
+  phase('create_validated');
   const template = DriveApp.getFileById(templateId);
   const copy = template.makeCopy(name, folder);
+  phase('create_copied');
   try {
     const ss = SpreadsheetApp.openById(copy.getId());
     const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
@@ -337,7 +375,9 @@ function bvlCreate_(folderId, templateId, payload) {
     info.getRange(Math.max(1,first.headerRow-1),Math.min(3,info.getMaxColumns())).setValue(chosenDate.display);
     log.getRange('D2').setValue(BVL.DATE + ' ' + chosenDate.display);
     bvlPrepare_(ss);
+    phase('create_prepared');
     SpreadsheetApp.flush();
+    phase('create_flushed');
     if (idempotentKey) PropertiesService.getScriptProperties().setProperty(idempotentKey,copy.getId());
     return {ok:true, document:{id:copy.getId(),name:name,created:now.toISOString(),url:copy.getUrl()}};
   } catch (err) {
@@ -393,25 +433,44 @@ function bvlFindId_(sheet, idCol, fromRow, opId) {
 function bvlStamp_(meta, p, result) {
   meta.appendRow([p.op_id, p.kind, new Date().toISOString(), p.author || '', JSON.stringify(result).slice(0,1000)]);
 }
+// Find the last nonempty operational row without fetching the entire history.
+// The reference implementation scanned all rows from firstRow to getLastRow().
+// Work backwards in bounded chunks, preserving the same result even when
+// trailing rows contain values in columns outside the operational range.
 function bvlEnd_(sheet, firstRow, firstCol, columnCount) {
-  const last = sheet.getLastRow();
-  if (last < firstRow) return firstRow - 1;
-  const range = sheet.getRange(firstRow,firstCol,last-firstRow+1,columnCount).getDisplayValues();
-  let end = firstRow - 1;
-  for (let i=0;i<range.length;i++) {
-    if (range[i].some(v => String(v).trim() !== '')) end = firstRow + i;
+  const last=sheet.getLastRow();
+  if(last<firstRow)return firstRow-1;
+  let batch=256;
+  for(let end=last;end>=firstRow;){
+    const start=Math.max(firstRow,end-batch+1);
+    const rows=sheet.getRange(start,firstCol,end-start+1,columnCount).getDisplayValues();
+    for(let i=rows.length-1;i>=0;i--){
+      if(rows[i].some(v=>String(v).trim()!==''))return start+i;
+    }
+    end=start-1;
+    // Sparse trailing metadata can produce a very long empty tail. Increase
+    // the block size gradually, capped at 4096 rows per request.
+    batch=Math.min(4096,batch*2);
   }
-  return end;
+  return firstRow-1;
 }
-function bvlOperation_(folderId, templateId, payload) {
+function bvlOperation_(folderId, templateId, payload, requestId) {
+  const phase=bvlPhaseTracer_(requestId,'operation');
+  phase('operation_start');
   const docId = bvlValidId_(payload.doc_id);
   const opId = String(payload.op_id || '');
   if (!/^[a-f0-9-]{32,50}$/i.test(opId)) return {ok:false,code:'bad_id',message:'Invalid operation ID.'};
   const ss = bvlDoc_(folderId, templateId, docId);
+  phase('operation_doc_opened');
   const needed=payload.kind==='field'||payload.kind==='add_row' ? String(payload.sheet||'') :
     payload.kind==='audio_part'&&payload.target_kind==='field' ? String(payload.field_sheet||'') : 'LOG';
   const meta = bvlPrepare_(ss,needed);
-  if (bvlDone_(meta, opId)) return {ok:true,deduplicated:true,complete:payload.kind==='audio_part'};
+  phase('operation_prepared');
+  if (bvlDone_(meta, opId)) {
+    phase('operation_deduplicated');
+    return {ok:true,deduplicated:true,complete:payload.kind==='audio_part'};
+  }
+  phase('operation_dedup_checked');
   let existingRow = 0;
   if (payload.kind === 'log') existingRow = bvlFindId_(ss.getSheetByName('LOG'), 7, 3, opId);
   if (payload.kind === 'add_row' && payload.sheet === 'TEAM') existingRow = bvlFindId_(ss.getSheetByName('TEAM'), 9, 3, opId);
@@ -419,6 +478,7 @@ function bvlOperation_(folderId, templateId, payload) {
   if (existingRow) {
     const dedup = {ok:true,deduplicated:true,row:existingRow};
     bvlStamp_(meta,payload,dedup);
+    phase('operation_existing_row');
     return dedup;
   }
   let result;
@@ -429,8 +489,11 @@ function bvlOperation_(folderId, templateId, payload) {
   else if (payload.kind === 'audio_part') result = bvlAudioPart_(folderId,ss,payload);
   else if (payload.kind === 'log_change') result = bvlLogChange_(ss,payload);
   else return {ok:false,code:'kind',message:'Unsupported operation type.'};
+  phase('operation_applied');
   if (result.ok && (payload.kind !== 'audio_part' || result.complete)) bvlStamp_(meta, payload, result);
+  phase('operation_stamp_checked');
   SpreadsheetApp.flush();
+  phase('operation_flushed');
   return result;
 }
 function bvlLog_(ss, p) {
@@ -522,26 +585,32 @@ function bvlAddRow_(ss, p) {
   return {ok:true,row:next};
 }
 function bvlRead_(folderId, templateId, docId, requestId) {
-  const traceStart=Date.now();
-  const phase=name=>bvlTrace_(requestId,'read',name,traceStart);
+  const phase=bvlPhaseTracer_(requestId,'read');
   phase('read_start');
-  const ss = bvlDoc_(folderId,templateId,docId);
+  const metadata={};
+  const ss = bvlDoc_(folderId,templateId,docId,metadata);
   phase('document_opened');
   const info = ss.getSheetByName('INFO'), log = ss.getSheetByName('LOG');
   const team = ss.getSheetByName('TEAM'), tech = ss.getSheetByName('TECH');
   const data = {};
-  data.MISSING_TABS=['INFO','LOG','TEAM','TECH'].filter(name=>!ss.getSheetByName(name));
+  // Reuse these handles: getSheetByName for each tab has already been called.
+  data.MISSING_TABS=['INFO','LOG','TEAM','TECH'].filter((name,i)=>![info,log,team,tech][i]);
+  phase('sheet_handles_loaded');
   const infoSections=bvlInfoSections_(info);
   data.INFO_SECTIONS=infoSections;
+  phase('info_schema_loaded');
   data.INFO=info?info.getRange(1,1,Math.min(Math.max(info.getLastRow(),34),150),4).getDisplayValues():[];
   phase('info_loaded');
   let logStart=2,lr=[],photoRich=[];
   if(log){
     const logEnd=bvlEnd_(log,2,2,6);
+    phase('log_end_scanned');
     logStart=Math.max(2,logEnd-119);
     lr=log.getRange(logStart,1,Math.max(1,logEnd-logStart+1),8).getDisplayValues();
+    phase('log_values_loaded');
     // Reads must not change image anchors; any maintenance needs its own explicit write operation.
     photoRich=log.getRange(logStart,6,Math.max(1,logEnd-logStart+1),1).getRichTextValues();
+    phase('log_richtext_loaded');
   }
   phase('log_loaded');
   const byLogId = {};
@@ -591,6 +660,7 @@ function bvlRead_(folderId, templateId, docId, requestId) {
       audio:byAudio[String(v[6]||'')]||null, history:(byHistory[String(v[6]||'')]||[]).slice(-8),
       photos:(byLogId[String(v[6] || '')] || []).concat(legacy)};
   }).filter(x => x.cells.slice(1,7).some(Boolean));
+  phase('log_assembled');
   for (const name of ['TEAM','TECH']) {
     const sheet=name==='TEAM'?team:tech;
     if(!sheet){data[name]=[];continue;}
@@ -604,7 +674,7 @@ function bvlRead_(folderId, templateId, docId, requestId) {
   }
 
   phase('team_tech_loaded');
-  const result={ok:true,id:docId,name:DriveApp.getFileById(docId).getName(),url:ss.getUrl(),data:data};
+  const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data};
   phase('read_complete');
   return result;
 }

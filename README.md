@@ -39,6 +39,12 @@ end-to-end `PERF-02`–`PERF-15` timings have **not** been measured. The
 historic audio/photo bridge timings must not be treated as full upload or
 playback duration. The referenced `benchmark.py` runner was not supplied.
 
+### v0.8.0-A in development (NOT deployed)
+
+**Staging A/B benchmark tooling:** a guarded editor-only runner (`apps-script/STAGING_READ_BENCHMARK.gs`) and a privacy-safe comparison script (`tools/compare-staging-reads.mjs`) are prepared. Use only a synthetic spreadsheet named `BVLOG_BENCHMARK_*` in an isolated staging folder; no live Google timings have been collected yet. See [Bulgarian staging instructions](docs/STAGING_TEST_V080A_BG.md).
+
+[Feature branch](https://github.com/issaev/bg-voice-logger/tree/feature/v0.8.0a-gas-read-profiling) begins v0.8.0 with an Apps Script-only profiling and Sheets-read optimization candidate. It bounds last-row scans, reuses authorized Drive and Sheet handles, and records privacy-safe per-phase timings. **WordPress production stays at the operator-reported v0.7.2.1.** This is **not** the v0.8.0 release and has no audio streaming implementation yet. Read [measurement and rollback plan](docs/PLAN_V080A_BG.md). Synthetic tests: **25/35 PASS vs 23/33 on v0.7.2.1, same ten inherited failures**, with no real GAS speed measurements.
+
 ### Project status
 
 **Source synchronized to operator-deployed v0.7.2.1:** WordPress v0.7.2.1; embedded JS build `0.7.2.1-613947b7e695`. This release includes [#18](https://github.com/issaev/bg-voice-logger/issues/18) voice continuity, [#15](https://github.com/issaev/bg-voice-logger/issues/15) read transport / diagnostics and [#17](https://github.com/issaev/bg-voice-logger/issues/17) scoped errors. Cloudflare STT and IndexedDB schema remain unchanged.
