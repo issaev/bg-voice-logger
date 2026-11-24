@@ -1,4 +1,4 @@
-## v0.7.2.1 — Reliability & continuous voice LOG hotfix (DRAFT; not deployed)
+## v0.7.2.1 — Reliability & continuous voice LOG hotfix (operator-reported production 2026-11-24; acceptance pending)
 - #18: render each dictated LOG event continuously through audio/STT/review/pending/sending/synced/server echo with one stable op_id and no duplicate/flicker.
 - #17: distinct incident-list, document-read, sync and local persistence errors; a successful read cannot mask unrelated unsaved audio. Keep last confirmed data on read failure.
 - #15: read POST timeout 35s (previously 15s), redirect GET 15s, other operation budgets unchanged. Bound 120s polling with backoff and prevent overlapping reads for an incident.
