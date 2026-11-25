@@ -61,6 +61,7 @@ require_once BVLOG_DIR . 'includes/class-bvlog-read-projection.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-google-read.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-read.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-plan.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-sheet-plan.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-google-log-write.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-engine.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-write-ledger.php';

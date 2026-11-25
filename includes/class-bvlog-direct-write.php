@@ -34,7 +34,7 @@ final class BVLOG_Direct_Write {
             'proof_key'=>'bvlog_dw_fence_'.substr($proof,0,48));
     }
     private static function ready($doc){
-        if(!defined('BVLOG_DIRECT_WRITE_MODE')||BVLOG_DIRECT_WRITE_MODE!=='log_pilot'||
+        if(!defined('BVLOG_DIRECT_WRITE_MODE')||!in_array(BVLOG_DIRECT_WRITE_MODE,array('log_pilot','sheet_pilot'),true)||
             BVLOG_Direct_Read::mode()!=='direct'||!BVLOG_Direct_Read::approved($doc,'LOG'))
             throw new BVLOG_Direct_Error('write_disabled');
         $cfg=self::config($doc);$verified=(int)get_option($cfg['proof_key'],0);
@@ -49,10 +49,16 @@ final class BVLOG_Direct_Write {
         $doc=$p['doc_id']??'';
         try{
             if(!self::fenced($doc))throw new BVLOG_Direct_Error('scope_denied',403);
-            if(($p['kind']??'')!=='log')
-                return rest_ensure_response(array('ok'=>false,'code'=>'write_unsupported',
-                    'message'=>'Direct LOG pilot: other writes are disabled for this test incident.'));
             $cfg=self::ready($doc);
+            $kind=$p['kind']??'';
+            if($kind!=='log'){
+                // Only explicitly isolated synthetic docs permit edits. The
+                // manual-editor race cannot be solved by a Drive version check.
+                $exclusive=defined('BVLOG_DIRECT_WRITE_EXCLUSIVE')?BVLOG_DIRECT_WRITE_EXCLUSIVE:array();
+                if(BVLOG_DIRECT_WRITE_MODE!=='sheet_pilot'||!is_array($exclusive)||!in_array($doc,$exclusive,true)||
+                   !in_array($kind,array('field','add_row','log_change'),true))
+                    throw new BVLOG_Log_Plan_Error('write_unsupported');
+            }
             // Normal operation() supplies a server-calculated actor-bound hash;
             // SMS attempt() supplies the same hash only after grant/HMAC checks.
             // No client-provided hash or transport is accepted by operation().
@@ -61,11 +67,14 @@ final class BVLOG_Direct_Write {
             $google=new BVLOG_Google_Log_Write_Transport($cfg,24);
             $ack=BVLOG_Direct_Log_Engine::run($doc,$p,$google,new BVLOG_Direct_Write_Ledger(),
                 new BVLOG_Direct_Write_Cache(),new DateTimeImmutable('now',new DateTimeZone('UTC')));
-            $response=rest_ensure_response($ack+array('write_backend'=>'direct_log_v1'));
+            $response=rest_ensure_response($ack+array('write_backend'=>$kind==='log'?'direct_log_v1':'direct_sheet_v1'));
             $response->header('Cache-Control','private, no-store, max-age=0');
             return $response;
+        }catch(BVLOG_Sheet_Conflict $e){
+            return rest_ensure_response(array('ok'=>false,'code'=>$e->getMessage(),'message'=>'Value or row changed. Refresh before editing.',
+                'current'=>$e->current,'row'=>$e->row));
         }catch(BVLOG_Log_Plan_Error $e){
-            $code=in_array($e->getMessage(),array('write_review','write_headers','write_shape','log_input'),true)?$e->getMessage():'write_shape';
+            $code=in_array($e->getMessage(),array('write_review','write_headers','write_shape','log_input','write_unsupported','protected_range','validation_type','validation_choice'),true)?$e->getMessage():'write_shape';
             return rest_ensure_response(array('ok'=>false,'code'=>$code,
                 'message'=>'Direct LOG pilot: '.$code.'. Keep the original operation ID; ask an administrator.'));
         }catch(Throwable $e){
@@ -104,7 +113,7 @@ final class BVLOG_Direct_Write {
         if(!current_user_can('manage_options'))return;
         echo '<h2>Direct LOG writer pilot (#50)</h2>';
         if(!self::fences()){echo '<p>OFF. No direct-write test incidents configured.</p>';return;}
-        echo '<p>Prepared synthetic incidents only. LOG append only. Do not edit or sort this test LOG manually during dispatch. Other mutations are deliberately blocked. Fence verification is required every 24 hours.</p>';
+        echo '<p>Prepared synthetic incidents only. LOG append; sheet_pilot additionally permits supported field, row and LOG changes. Do not edit or sort a test document manually while the writer is active. CREATE/media remain outside this direct pilot. Fence verification is required every 24 hours.</p>';
         if(isset($_GET['write_fence']))echo '<p>'.(($_GET['write_fence']==='ok')?'Fence verified.':'Fence verification failed.').'</p>';
         foreach(self::slots() as $i=>$doc){
             $state='not ready';$pending='unknown';

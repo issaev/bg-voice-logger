@@ -545,6 +545,9 @@ class BVLOG_API {
             $body['base'] = sanitize_textarea_field($p['base'] ?? '');
             $body['value'] = sanitize_textarea_field($p['value'] ?? '');
             $body['row_key'] = sanitize_text_field($p['row_key'] ?? '');
+            $body['section'] = absint($p['section'] ?? 0);
+            $body['field_label'] = sanitize_text_field($p['field_label'] ?? '');
+            $body['header_label'] = sanitize_text_field($p['header_label'] ?? '');
             $body['force_base'] = isset($p['force_base']) ? sanitize_textarea_field($p['force_base']) : null;
         } else {
             $sheet = strtoupper(sanitize_key($p['sheet'] ?? ''));
@@ -553,6 +556,12 @@ class BVLOG_API {
             $vals = (array)($p['values'] ?? array());
             $body['values'] = array_map('sanitize_text_field', array_slice(array_values($vals), 0, 8));
             if (count(array_filter($body['values'])) === 0) { return new WP_Error('bvlog_values', 'A new row cannot be empty.', array('status' => 400)); }
+        }
+        if($kind!=='log'&&class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc_id)){
+            $identity=BVLOG_Auth::identity();
+            if(!$identity||!in_array($identity['kind']??'',array('google','wordpress'),true))
+                return new WP_Error('bvlog_login_required','Login required.',array('status'=>401));
+            $body['payload_hash']=hash('sha256',BVLOG_Direct_Crypto::json(array($identity['kind'],$identity['sub']??'', $body)));
         }
         return self::forward('operation', $body);
     }
