@@ -18,7 +18,7 @@ const originalFetch=globalThis.fetch;
 globalThis.fetch=async (url,options)=>{
  assert.equal(url,'https://api.groq.com/openai/v1/audio/transcriptions');
  assert.equal(options.headers.Authorization,'Bearer fake-groq-key');
- const m=options.body;assert.equal(m.get('language'),'bg');assert.equal(m.get('model'),'whisper-large-v3');assert.equal(m.get('response_format'),'verbose_json');assert.equal(m.get('prompt'),null,'Prompt echo risk must be removed');
+ const m=options.body;assert.equal(m.get('language'),'bg');assert.equal(m.get('model'),'whisper-large-v3');assert.equal(m.get('response_format'),'verbose_json');assert.ok(m.get('prompt')?.includes('ПСС'),'Groq must receive the approved SAR prompt');
  count++;
  return new Response(JSON.stringify(groqStatus===200?{text:groqText,segments:groqSegments,duration:7}:{error:{type:'rate_limit'}}),{status:groqStatus,headers:{'Content-Type':'application/json'}});
 };
@@ -51,12 +51,10 @@ try{
  r=await worker.fetch(request(good),env);assert.equal(r.status,409);assert.equal(count,1);
  groqText='САР, К9, CalTopo, Витоша, сектор, екип Алфа, координати, сборен пункт.';
  r=await worker.fetch(request(ticket()),env);data=await r.json();
- assert.equal(data.quality.status,'suspicious');assert.ok(data.quality.reasons.includes('prompt_echo'));
+ assert.equal(r.status,422);assert.equal(data.code,'no_speech');assert.equal(data.retryable,false);assert.equal(fallbackCalls,0,'Prompt echo must not trigger fallback');
  groqText='Говорим по телефона на сектор 2.';groqSegments=[{avg_logprob:-1.4,no_speech_prob:0.77,compression_ratio:2.8}];
  r=await worker.fetch(request(ticket()),env);data=await r.json();
- assert.equal(data.quality.status,'suspicious');
- assert.ok(data.quality.reasons.includes('possible_silence'));
- assert.ok(data.quality.reasons.includes('compression_anomaly'));
+ assert.equal(r.status,422);assert.equal(data.code,'no_speech');assert.equal(fallbackCalls,0,'Silence must not trigger fallback');
  groqSegments=[];
  groqText='Екип Алфа достигна сборния пункт.';
  groqStatus=429;r=await worker.fetch(request(ticket()),env);data=await r.json();
@@ -68,5 +66,5 @@ try{
  const prev=env.STT_RATE_LIMIT;env.STT_RATE_LIMIT={limit:async()=>({success:false})};
  r=await worker.fetch(request(ticket()),env);assert.equal(r.status,429);env.STT_RATE_LIMIT=prev;
  const missingNonce={...env,STT_NONCES:undefined};r=await worker.fetch(request(ticket()),missingNonce);assert.equal(r.status,503);
- console.log('PASS v0.6.0: verbose_json, no prompt, hallucination and quality flags, HMAC, fallback, audio safety.');
+ console.log('PASS v0.6.0: verbose_json, SAR prompt, hallucination and quality flags, HMAC, fallback, audio safety.');
 }finally{globalThis.fetch=originalFetch;}

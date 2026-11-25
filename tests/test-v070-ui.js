@@ -2,7 +2,8 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
 const marker=code.match(/const BVLOG_RUNNING_BUILD = '([^']+)'/)[1];
-assert.match(marker,/^0\.7\.2\.1-[a-f0-9]{12}$/);
+assert.match(marker,/^[0-9]+(?:\.[0-9]+){2,3}-[a-f0-9]{12}$/);
+assert.ok(marker.startsWith(require('./fixture-contract').version+'-'));
 let output,hook=0;
 const stateNames=Array.from(code.matchAll(/const \[([A-Za-z][A-Za-z0-9]*),\s*set[A-Za-z0-9]+\]=useState\(/g)).map(x=>x[1]);
 const states={};
@@ -20,7 +21,7 @@ const ctx={wp:{element:{createElement:h,useState:init=>{const i=hook++;if(!(i in
 return [states[i],v=>{states[i]=typeof v==='function'?v(states[i]):v;}];},useEffect:()=>{},useRef:v=>({current:v}),
 createRoot:()=>({render:x=>output=x})}},
 window:{BVLOG_CONFIG:{api:'/wp-json/',auth_mode:'google',stt_mode:'cloud',user:{id:0,name:''},
-plugin_version:'0.7.2.1',expected_build:marker,logo_url:'/logo.webp'},setTimeout},navigator:{onLine:true},
+plugin_version:require('./fixture-contract').version,expected_build:marker,logo_url:'/logo.webp'},setTimeout},navigator:{onLine:true},
 document:{getElementById:()=>({})},indexedDB:{},localStorage:{getItem:()=>'',setItem:()=>{}},console,setTimeout};
 vm.createContext(ctx);vm.runInContext(code,ctx);
 assert.strictEqual(ctx.window.BVLOG_RUNNING_BUILD,marker);

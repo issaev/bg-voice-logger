@@ -75,7 +75,7 @@ assert.strictEqual(reordered[0].columns[0].letter,'C','INFO value must remain pr
 assert.strictEqual(ctx.bvlFindInfoField_(moved,{section:0,row:3,col:'B',field_label:'\u0410\u043a\u0446\u0438\u044f',header_label:'\u0418\u043d\u0444\u043e'}).col,'C');
 // Missing unrelated tabs must not block a LOG-only operation.
 const headers={};
-const logOnly={getSheetByName:name=>name==='LOG'?{getRange:ref=>({getDisplayValue:()=>headers[ref]||'',setValue:v=>{headers[ref]=v;}}),hideColumns:()=>{}}:null};
+const logOnly={getSheetByName:name=>name==='LOG'?{getRange:ref=>({getDisplayValue:()=>headers[ref]||'',getDisplayValues:()=>[['G1','H1','I1','J1'].map(k=>headers[k]||'')],setValues:rows=>{rows[0].forEach((v,i)=>headers[['G1','H1','I1','J1'][i]]=v);},setValue:v=>{headers[ref]=v;}}),hideColumns:()=>{}}:null};
 ctx.bvlMeta_=()=>({});
 assert.ok(ctx.bvlPrepare_(logOnly,'LOG'));
 assert.strictEqual(headers.G1,'BVLOG_ID');

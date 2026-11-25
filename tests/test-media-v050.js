@@ -39,6 +39,7 @@ class Sheet {
     const colEnd=match[3]?match[3].split('').reduce((v,x)=>v*26+x.charCodeAt(0)-64,0):col;
     return new Range(this,row,col,match[4]?Number(match[4])-row+1:1,colEnd-col+1);
   }return new Range(this,a,b,n,m);}
+  getLastColumn(){return this.grid.reduce((max,row)=>Math.max(max,row.reduce((last,v,i)=>v!==''&&v!==null?i+1:last,0)),0);}
   getLastRow(){for(let r=this.grid.length;r>=1;r--)if(this.grid[r-1].some(x=>x!==''&&x!==null))return r;return 0;}
   getMaxRows(){return this.grid.length;}
   insertRowsAfter(at,n){for(let i=0;i<n;i++)this.grid.splice(at,0,Array(16).fill(''));}
@@ -133,8 +134,9 @@ const moved=ctx.bvlRead_(rootId,templateId,docId);
 assert.equal(moved.data.LOG.find(x=>x.row===4).photos.length,1);
 // Simulate a sort that moves the original LOG record from row 3 to row 8.
 for(let c=1;c<=7;c++){sheets.LOG.set(8,c,sheets.LOG.get(3,c));sheets.LOG.set(3,c,'');}
-ctx.bvlRead_(rootId,templateId,docId);
-assert.equal(sheets.LOG.images[0].getAnchorCell().getRow(),8,'Thumbnail follows stable LOG ID after sorting');
+const sorted=ctx.bvlRead_(rootId,templateId,docId);
+assert.equal(sorted.data.LOG.find(x=>x.row===8).photos.length,2,'Photo association follows stable LOG ID after sorting');
+assert.equal(sheets.LOG.images[0].getAnchorCell().getRow(),3,'Read must not mutate spreadsheet image anchors');
 const noTarget=ctx.bvlAttachPhoto_(rootId,ss,{...upload,op_id:'eeeeeeee-eeee-4eee-aaaa-eeeeeeeeeeee',log_op_id:'11111111-1111-4111-8111-111111111111'});
 assert.equal(noTarget.code,'waiting_for_log');assert.equal(folderCount,1);
 console.log('PASS: lazy incident folder naming, original + thumbnail, F anchored image, multi-photo count, retries, private image read, manual rows, sort rebinding and target validation.');

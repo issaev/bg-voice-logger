@@ -4,14 +4,15 @@ const vm=require('vm');
 const assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
 let output,hook=0;
+const slot=n=>require('./fixture-contract').slot(code,n);
 const values={
-  0:'session',
-  1:{id:'DOCUMENTABCDEFGHIJKLMN012345',name:'2026.11.11 - ДКА - Издирване - Витоша'},
-  2:'LOG',
-  3:{LOG:[{row:3,cells:[1,'14:32','Operator','Съобщение','През приложението','📷','log-id'],
+  [slot('mode')]:'session',
+  [slot('doc')]:{id:'DOCUMENTABCDEFGHIJKLMN012345',name:'2026.11.11 - ДКА - Издирване - Витоша'},
+  [slot('page')]:'LOG',
+  [slot('data')]:{LOG:[{row:3,cells:[1,'14:32','Operator','Съобщение','През приложението','📷','log-id'],
     photos:[{id:'11111111-1111-4111-8111-111111111111',managed:true,text:'first.jpg'},
       {id:'22222222-2222-4222-8222-222222222222',managed:true,text:'second.jpg'}]}]},
-  13:{kind:'google',sub:'123456789',name:'Operator'},14:false
+  [slot('auth')]:{kind:'google',sub:'123456789',name:'Operator'},[slot('authLoading')]:false
 };
 const make=(type,props,...children)=>({type,props:props||{},children});
 const ctx={wp:{element:{createElement:make,useState:init=>{

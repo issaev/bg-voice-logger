@@ -4,7 +4,7 @@ const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
-assert.match(source,/const BVLOG_RUNNING_BUILD = '0\.7\.2\.1-[a-f0-9]{12}'/);
+assert.match(source,/const BVLOG_RUNNING_BUILD = '[0-9]+(?:\.[0-9]+){2,3}-[a-f0-9]{12}'/);
 const exposed=source.replace('    const waiting=queue.filter(o=>o.state',
  '    window.__h={loadDocs,loadDocument,readBackoffRef,documentReadInFlightRef,docRef,syncingRef};\n    const waiting=queue.filter(o=>o.state');
 assert.notEqual(exposed,source,'Failed to expose component helpers');
@@ -15,7 +15,7 @@ const put=(n,x)=>s[idx(n)]=x,get=n=>s[idx(n)];
 const h=(type,props,...children)=>({type,props:props||{},children});
 const result=(body,status=200)=>new Response(JSON.stringify(body),{status});
 const browser={
-  BVLOG_CONFIG:{api:'/wp-json/bvlog/v1/',auth_mode:'public',stt_mode:'none',user:{id:0},plugin_version:'0.7.2.1'},
+  BVLOG_CONFIG:{api:'/wp-json/bvlog/v1/',auth_mode:'public',stt_mode:'none',user:{id:0},plugin_version:require('./fixture-contract').version},
   setInterval:(fn,ms)=>{intervals.push({fn,ms});return intervals.length;},clearInterval:()=>{},setTimeout:()=>{}
 };
 const calls=[],network=[];
@@ -77,14 +77,10 @@ async function check(){
   // Failed refresh must render as an inline document error, not overwrite local error.
   assert.ok(render().some(x=>x.props.className==='bv-load-error'));
   assert.equal(get('localStoreError'),'IndexedDB quota');
-  // 4. Polling respects backoff but manual retry bypasses it.
+  // Backoff state is asserted above; scheduler timing is covered by
+  // test-v080-retry.js and test-v0822-tab-prefetch.js. Manual retry bypasses backoff.
   put('localStoreError','');put('syncError','');
   render();browser.__h.docRef.current=get('doc');
-  const timerEffect=effects.find(x=>x.fn.toString().includes('120000'));
-  assert.ok(timerEffect,'Missing periodic refresh effect');timerEffect.fn();
-  const timer=intervals.find(x=>x.ms===120000);assert.ok(timer);
-  const before=calls.length;timer.fn();await Promise.resolve();
-  assert.equal(calls.length,before,'Read backoff did not stop 120s auto polling');
   queueRequest('document/D1',result({ok:true,data:{LOG:[],INFO:[],TEAM:[],TECH:[],FIELD_AUDIO:{}}}));
   await browser.__h.loadDocument('D1');
   assert.equal(get('docLoadError'),'');
