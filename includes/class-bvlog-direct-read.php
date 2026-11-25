@@ -58,7 +58,7 @@ final class BVLOG_Direct_Read {
         catch(Throwable $e){
             // Do not turn a confirmed write into a failed ACK. A retained writer
             // marker prevents the experimental read cache from being reused.
-            update_option('bvlog_direct_last_guard_error',gmdate('c'),false);
+            try{update_option('bvlog_direct_last_guard_error',gmdate('c'),false);}catch(Throwable $ignore){}
         }
     }
     private static function decorated($result,$backend,$created,$reason=''){
@@ -128,6 +128,9 @@ final class BVLOG_Direct_Read {
         if($tab==='INFO'&&class_exists('BVLOG_SMS')&&BVLOG_SMS::test_doc($doc))return null;
         try{
             $cfg=self::config();$google=new BVLOG_Google_Read_Transport($cfg);
+            // Opportunistically remove expired pilot snapshots/markers, never
+            // the original application queue or operational data.
+            if(random_int(1,20)===1)BVLOG_Read_Cache::cleanup();
             try{$r=self::direct($doc,$tab,$cfg,$google,true,$force);}
             catch(Throwable $e){
                 $reason=$e instanceof BVLOG_Read_Unsupported?'unsupported_shape':

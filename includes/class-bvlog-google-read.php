@@ -164,7 +164,7 @@ final class BVLOG_Google_Read_Transport {
             $range=BVLOG_Read_Projection::legacy_range($values['LOG']??array());
             if($range)BVLOG_Read_Projection::check_legacy($this->sheet($doc,
                 'spreadsheetId,sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,hyperlink,textFormatRuns(format(link)),userEnteredFormat(textFormat(link))))))',
-                array($range)),$doc);
+                array($range)),$doc,$values['LOG']);
         }
         return array('ok'=>true,'id'=>$doc,'name'=>$meta['name'],'url'=>'https://docs.google.com/spreadsheets/d/'.$doc.'/edit',
             'loaded_tabs'=>array($tab),'data'=>BVLOG_Read_Projection::project($tab,$sheets,$values,$info));

@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.3-5e7cf749a0ac';
+  const BVLOG_RUNNING_BUILD = '0.9.0-alpha.1-0b29dbb53a6c';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -297,6 +297,16 @@
       throw error;
     }
     return out;
+  }
+  // Use the original server snapshot age, not the time a cached response arrived.
+  // Relative server age avoids relying on the phone clock being synchronized.
+  function readSnapshotStamp(result,now=Date.now()){
+    const m=result?.read_meta;
+    if(m?.backend!=='server_cache')return new Date(now).toISOString();
+    const age=Date.parse(m.verified_at)-Date.parse(m.fetched_at);
+    if(!Number.isFinite(age)||age<0||age>30000)
+      throw Error('Invalid server cache freshness');
+    return new Date(now-age).toISOString();
   }
   function today(time) {
     return new Date(time||Date.now()).toLocaleString('bg-BG',{dateStyle:'short',timeZone:'Europe/Sofia'});
@@ -1146,12 +1156,12 @@
           return;
         }
         const separator=String(CFG.api||'').includes('?')?'&':'?';
-        const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab,'GET',undefined,controller?.signal);
+        const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab+(force?'&fresh=1':''),'GET',undefined,controller?.signal);
         if(!r.ok||r.id&&r.id!==id||!hasTabData(r.data,tab)||
           (Array.isArray(r.loaded_tabs)&&!r.loaded_tabs.includes(tab)))
           throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
         if(!current())return;
-        const stamp=new Date().toISOString();
+        const stamp=readSnapshotStamp(r);
         const entry=rememberTab(id,tab,{data:r.data,stamp,live:true,dirty:false,error:'',retryAt:0,failures:0});
         if(visible()){
           // Do not replace an already visible edit target while a speculative
@@ -2472,7 +2482,7 @@
                 h('span',{className:'bv-sr-only'},readActivity?'Обновяване на данните':'')))),
           h('div',{className:'bv-action-buttons'},
             (!online||cachedView&&!readActivity)&&h('span',{className:'bv-fresh-label',role:'status'},!online?'Офлайн':'Локално копие'),
-            h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
+            h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id,false,undefined,true),
               title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
             h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
         h('nav',{className:'bv-tabs','aria-label':'Tabs'},[

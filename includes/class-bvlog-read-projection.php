@@ -104,16 +104,28 @@ final class BVLOG_Read_Projection {
     /** Managed media are projected from the indexes. Legacy linked rich text
      * is deliberately delegated to GAS until exact run-level parity is proven.
      */
-    public static function check_legacy($raw,$doc) {
-        if(($raw['spreadsheetId']??'')!==$doc||count($raw['sheets']??array())!==1||
-            ($raw['sheets'][0]['properties']['title']??'')!=='LOG')self::unsupported();
-        foreach(($raw['sheets'][0]['data']??array()) as $block){
-            foreach(($block['rowData']??array()) as $row)foreach(($row['values']??array()) as $c){
-                if(!empty($c['hyperlink'])||!empty($c['userEnteredFormat']['textFormat']['link'])||
-                    !empty($c['userEnteredValue']['formulaValue']))self::unsupported();
-                foreach(($c['textFormatRuns']??array()) as $run)
-                    if(!empty($run['format']['link']))self::unsupported();
-            }
+    private static function grid_sheet($raw,$doc,$title){
+        if(($raw['spreadsheetId']??'')!==$doc||!is_array($raw['sheets']??null))self::unsupported();
+        $matches=array_values(array_filter($raw['sheets'],function($s)use($title){return ($s['properties']['title']??'')===$title;}));
+        if(count($matches)!==1)self::unsupported();
+        return $matches[0];
+    }
+    public static function check_legacy($raw,$doc,$rows) {
+        $tail=self::tail($rows);
+        $sheet=self::grid_sheet($raw,$doc,'LOG');$blocks=$sheet['data']??array();
+        if(count($blocks)!==1)self::unsupported();
+        $block=$blocks[0];
+        if(($block['startRow']??0)!==$tail['row']-1||($block['startColumn']??0)!==5||
+            count($block['rowData']??array())>count($tail['rows']))self::unsupported();
+        foreach($tail['rows'] as $i=>$r){
+            $cells=$block['rowData'][$i]['values']??array();
+            if(count($cells)>1)self::unsupported();
+            $c=$cells[0]??array();
+            if(self::s($c['formattedValue']??'')!==$r[5])self::unsupported();
+            if(!empty($c['hyperlink'])||!empty($c['userEnteredFormat']['textFormat']['link'])||
+                !empty($c['userEnteredValue']['formulaValue']))self::unsupported();
+            foreach(($c['textFormatRuns']??array()) as $run)
+                if(!empty($run['format']['link']))self::unsupported();
         }
     }
     public static function info_range($sheets) {
@@ -127,9 +139,8 @@ final class BVLOG_Read_Projection {
     }
     public static function info($raw,$sheets,$doc) {
         if(!isset($sheets['INFO']))return array('INFO'=>array(),'INFO_SECTIONS'=>array());
-        if(($raw['spreadsheetId']??'')!==$doc||count($raw['sheets']??array())!==1||
-            ($raw['sheets'][0]['properties']['title']??'')!=='INFO')self::unsupported();
-        $blocks=$raw['sheets'][0]['data']??array();
+        $sheet=self::grid_sheet($raw,$doc,'INFO');
+        $blocks=$sheet['data']??array();
         if(count($blocks)>1)self::unsupported();
         $block=$blocks[0]??array();
         if(($block['startRow']??0)!==0||($block['startColumn']??0)!==0)self::unsupported();
