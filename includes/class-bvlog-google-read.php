@@ -158,12 +158,12 @@ final class BVLOG_Google_Read_Transport {
         }
         if($tab==='INFO'){
             $range=BVLOG_Read_Projection::info_range($sheets);
-            $raw=$range?$this->sheet($doc,'spreadsheetId,sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,dataValidation(condition(type,values(userEnteredValue))))))',array($range)):array();
+            $raw=$range?$this->sheet($doc,'spreadsheetId,sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,dataValidation(condition(type,values(userEnteredValue)))))))',array($range)):array();
             $info=BVLOG_Read_Projection::info($raw,$sheets,$doc);
         }elseif($tab==='LOG'){
             $range=BVLOG_Read_Projection::legacy_range($values['LOG']??array());
             if($range)BVLOG_Read_Projection::check_legacy($this->sheet($doc,
-                'spreadsheetId,sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,hyperlink,textFormatRuns(format(link)),userEnteredFormat(textFormat(link)))))',
+                'spreadsheetId,sheets(properties(title),data(startRow,startColumn,rowData(values(formattedValue,userEnteredValue,hyperlink,textFormatRuns(format(link)),userEnteredFormat(textFormat(link))))))',
                 array($range)),$doc);
         }
         return array('ok'=>true,'id'=>$doc,'name'=>$meta['name'],'url'=>'https://docs.google.com/spreadsheets/d/'.$doc.'/edit',

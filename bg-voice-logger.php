@@ -57,6 +57,9 @@ require_once BVLOG_DIR . 'includes/class-bvlog-api.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-stt.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-admin.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-sms.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-read-projection.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-google-read.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-read.php';
 
 function bvlog_defaults() {
     return array(
@@ -184,6 +187,13 @@ add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 1
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('rest_api_init', array('BVLOG_SMS', 'register_routes'));
 add_action('admin_init', array('BVLOG_SMS', 'install'));
+add_action('admin_init', array('BVLOG_Direct_Read', 'install'));
+add_action('rest_api_init', array('BVLOG_Direct_Read', 'register_routes'));
+add_filter('rest_post_dispatch', function($response,$server,$request){
+    if(preg_match('~^/bvlog/v1/(document/|performance-probe$)~',$request->get_route()))
+        $response->header('Cache-Control','private, no-store, max-age=0');
+    return $response;
+},10,3);
 add_action('admin_post_bvlog_sms_retry', array('BVLOG_SMS', 'admin_retry'));
 add_action('admin_menu', array('BVLOG_Admin', 'register_menu'));
 add_action('admin_post_bvlog_save', array('BVLOG_Admin', 'save'));

@@ -68,6 +68,7 @@ class BVLOG_Admin {
         <div class="wrap" style="max-width:900px"><h1>Документ за координация на акция - Settings</h1>
         <p>Google Drive and Sheets access uses a separately deployed Google Apps Script web app. The browser never receives the shared secret.</p>
         <?php if(class_exists('BVLOG_SMS'))BVLOG_SMS::admin_panel(); ?>
+        <?php if(class_exists('BVLOG_Direct_Read'))BVLOG_Direct_Read::admin_panel(); ?>
         <div class="notice notice-info" style="padding:10px 15px;margin:15px 0;">
           <strong>Frontend build diagnostics (server-side expected values)</strong>
           <p>Plugin: <code><?php echo esc_html(BVLOG_VERSION); ?></code>;

@@ -158,7 +158,25 @@ class BVLOG_API {
         }
     }
 
+    public static function bridge_metrics() {
+        $m=self::$bridge_timings;
+        $m['http_calls']=(isset($m['post_ms'])?1:0)+(isset($m['redirect_ms'])?1:0);
+        return $m;
+    }
     public static function forward($action, $payload = array()) {
+        $guard=null;$result=null;
+        if($action==='operation'&&class_exists('BVLOG_Direct_Read')){
+            $guard=BVLOG_Direct_Read::begin_mutation($payload['doc_id']??'');
+            if(is_wp_error($guard))return $guard;
+        }
+        try{
+            $result=self::forward_bridge($action,$payload);
+            return $result;
+        }finally{
+            if(is_array($guard))BVLOG_Direct_Read::end_mutation($guard,$result);
+        }
+    }
+    private static function forward_bridge($action, $payload = array()) {
         $started = microtime(true);
         self::$bridge_request_id = substr(str_replace('-', '', wp_generate_uuid4()), 0, 12);
         self::$bridge_timings = array();
@@ -247,6 +265,7 @@ class BVLOG_API {
         }
 
         $raw = wp_remote_retrieve_body($response);
+        self::$bridge_timings['response_bytes']=strlen((string)$raw);
         if ($status < 200 || $status > 299) {
             self::trace($diag_action, 'http_error', $started, $status);
             return new WP_Error('bvlog_google_http', 'Google bridge returned HTTP ' . $status . '. Check WordPress bridge diagnostics.', array('status' => 424));
@@ -290,6 +309,10 @@ class BVLOG_API {
     public static function document($request) {
         $tab=strtoupper(sanitize_key((string)$request->get_param('tab')));
         $doc=sanitize_text_field($request['id']);
+        if(class_exists('BVLOG_Direct_Read')){
+            $direct=BVLOG_Direct_Read::document($doc,$tab,(string)$request->get_param('fresh')==='1');
+            if($direct!==null)return $direct;
+        }
         $result=self::forward('read', array('doc_id'=>$doc,
             'tab' => in_array($tab,array('LOG','INFO','TEAM','TECH'),true)?$tab:''));
         return $tab==='INFO'&&class_exists('BVLOG_SMS')?BVLOG_SMS::decorate($result,$doc):$result;
