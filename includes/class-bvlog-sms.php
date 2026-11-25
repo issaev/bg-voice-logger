@@ -175,7 +175,8 @@ class BVLOG_SMS {
         return hash('sha256',self::json(array($doc,$op,$time,$source,$text,$actor)));
     }
     public static function normal_log_hash($body) {
-        if(!self::test_doc($body['doc_id']??''))return '';
+        $doc=$body['doc_id']??'';
+        if(!self::test_doc($doc)&&!(class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc)))return '';
         $identity=BVLOG_Auth::identity();
         if(!$identity||!in_array($identity['kind']??'',array('google','wordpress'),true))return '';
         return self::log_hash($body['doc_id'],$body['op_id'],$body['event_at'],$body['source'],$body['text'],self::actor($identity));
@@ -304,7 +305,7 @@ class BVLOG_SMS {
         if(is_wp_error($result)||!method_exists($result,'get_data'))return self::err('google');
         $ack=$result->get_data();
         if(empty($ack['ok'])){
-            if(in_array($ack['code']??'',array('sms_conflict','log_input','bad_id'),true))return $review();
+            if(in_array($ack['code']??'',array('sms_conflict','write_review','log_input','bad_id'),true))return $review();
             return self::err('google');
         }
         self::status($rid,'APPLIED');

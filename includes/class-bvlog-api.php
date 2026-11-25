@@ -164,6 +164,8 @@ class BVLOG_API {
         return $m;
     }
     public static function forward($action, $payload = array()) {
+        if($action==='operation'&&class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($payload['doc_id']??''))
+            return BVLOG_Direct_Write::operation($payload); // never a GAS mutation fallback
         $guard=null;$result=null;
         if($action==='operation'&&class_exists('BVLOG_Direct_Read')){
             $guard=BVLOG_Direct_Read::begin_mutation($payload['doc_id']??'');

@@ -89,6 +89,21 @@ function doPost(e) {
   return ContentService.createTextOutput(json).setMimeType(ContentService.MimeType.JSON);
 }
 
+// A configured direct-write incident must never receive a legacy GAS
+// mutation. The script lock covers both fence checks and legacy writes.
+function bvlWriteFence_(docId) {
+  const raw=PropertiesService.getScriptProperties().getProperty('BVLOG_DIRECT_WRITE_FENCES');
+  if(!raw)return '';
+  const map=JSON.parse(raw);
+  if(!map||typeof map!=='object'||Array.isArray(map)||Object.keys(map).length>16)
+    throw new Error('Invalid direct writer fence configuration.');
+  for(const key of Object.keys(map)){
+    if(!bvlValidId_(key)||typeof map[key]!=='string'||!/^[A-Za-z0-9_-]{8,64}$/.test(map[key]))
+      throw new Error('Invalid direct writer fence configuration.');
+  }
+  return Object.prototype.hasOwnProperty.call(map,docId)?map[docId]:'';
+}
+
 function bvlDispatch_(request) {
   const folderId = bvlValidId_(request.folder_id);
   const templateId = bvlValidId_(request.template_id);
@@ -105,7 +120,7 @@ function bvlDispatch_(request) {
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id, payload.tab);
   if (action === 'photo_read') return bvlPhotoRead_(folderId, templateId, payload);
   if (action === 'audio_read') return bvlAudioRead_(folderId, templateId, payload);
-  if (action === 'create' || action === 'operation') {
+  if (action === 'create' || action === 'operation' || action === 'writer_policy') {
     // The write lock is not involved in read operations. Log its wait
     // separately to distinguish busy writes from slow Sheets/Drive calls.
     const requestStart=Date.now();
@@ -118,6 +133,13 @@ function bvlDispatch_(request) {
     bvlTrace_(request.request_id,action,'lock_acquired',requestStart);
     let result;
     try {
+      if(action==='writer_policy'){
+        const docId=bvlValidId_(payload.doc_id);
+        bvlDoc_(folderId,templateId,docId);
+        return {ok:true,policy:'direct_log_only_v1',fence_rollout:bvlWriteFence_(docId)};
+      }
+      if(action==='operation'&&bvlWriteFence_(bvlValidId_(payload.doc_id)))
+        return {ok:false,code:'writer_fenced',message:'This incident is reserved for the direct LOG writer.'};
       result=action==='create'?bvlCreate_(folderId,templateId,payload,request.request_id):
         bvlOperation_(folderId,templateId,payload,request.request_id);
     } finally { lock.releaseLock(); }

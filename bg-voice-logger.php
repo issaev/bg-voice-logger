@@ -60,6 +60,11 @@ require_once BVLOG_DIR . 'includes/class-bvlog-sms.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-read-projection.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-google-read.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-read.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-plan.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-google-log-write.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-engine.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-write-ledger.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-write.php';
 
 function bvlog_defaults() {
     return array(
@@ -188,6 +193,8 @@ add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('rest_api_init', array('BVLOG_SMS', 'register_routes'));
 add_action('admin_init', array('BVLOG_SMS', 'install'));
 add_action('admin_init', array('BVLOG_Direct_Read', 'install'));
+add_action('admin_init', array('BVLOG_Direct_Write', 'install'));
+add_action('admin_post_bvlog_verify_write_fence', array('BVLOG_Direct_Write', 'verify_fence'));
 add_action('rest_api_init', array('BVLOG_Direct_Read', 'register_routes'));
 add_filter('rest_post_dispatch', function($response,$server,$request){
     if(preg_match('~^/bvlog/v1/(document/|performance-probe$)~',$request->get_route()))
