@@ -304,6 +304,97 @@
   function timeOf(time) {
     return new Date(time||Date.now()).toLocaleTimeString('bg-BG',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Sofia'});
   }
+  // SMS pilot protocol DK1. Readable independent SMS, never base64 the message text.
+  // grant alias 8 + full reversible UUID 22 + part/total 2+2. First part
+  // additionally holds UTC seconds 6, source 1 and 96-bit HMAC 16.
+  const SMS_MAX_PARTS=96;
+  const SMS_B64='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  function smsB64(bytes){
+    let out='',bits=0,value=0;
+    for(const b of bytes){value=(value<<8)|b;bits+=8;while(bits>=6){bits-=6;out+=SMS_B64[(value>>>bits)&63];}}
+    if(bits)out+=SMS_B64[(value<<(6-bits))&63];return out;
+  }
+  function smsBytes(s){
+    if(!/^[A-Za-z0-9_-]+$/.test(s))throw Error('Invalid SMS credential');
+    let value=0,bits=0,out=[];
+    for(const c of s){value=(value<<6)|SMS_B64.indexOf(c);bits+=6;if(bits>=8){bits-=8;out.push((value>>>bits)&255);}}
+    const bytes=Uint8Array.from(out);
+    if(smsB64(bytes)!==s)throw Error('Invalid SMS credential');
+    return bytes;
+  }
+  function smsUuid(id){
+    const value=String(id||'').toLowerCase();
+    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
+      throw Error('SMS requires an original event identifier');
+    return smsB64(Uint8Array.from(value.replace(/-/g,'').match(/../g),v=>parseInt(v,16)));
+  }
+  function smsUnits(s){
+    const basic="@\u00a3$\u00a5\u00e8\u00e9\u00f9\u00ec\u00f2\u00c7\n\u00d8\u00f8\r\u00c5\u00e5\u0394_\u03a6\u0393\u039b\u03a9\u03a0\u03a8\u03a3\u0398\u039e\u00c6\u00e6\u00df\u00c9 !\"#\u00a4%&'()*+,-./0123456789:;<=>?\u00a1ABCDEFGHIJKLMNOPQRSTUVWXYZ\u00c4\u00d6\u00d1\u00dc\u00a7\u00bfabcdefghijklmnopqrstuvwxyz\u00e4\u00f6\u00f1\u00fc\u00e0";
+    const ext='\f^{}\\[~]|\u20ac';
+    let septets=0;
+    for(const c of s){if(basic.includes(c))septets++;else if(ext.includes(c))septets+=2;else return {encoding:'Unicode',units:s.length,limit:70};}
+    return {encoding:'GSM-7',units:septets,limit:160};
+  }
+  function smsFits(s){const count=smsUnits(s);return count.units<=count.limit;}
+  function smsSegments(text,header){
+    // Work on graphemes when supported, otherwise fail closed for complex
+    // combining/ZWJ sequences instead of splitting a character.
+    let chars;
+    if(typeof Intl.Segmenter==='function')chars=Array.from(new Intl.Segmenter('bg',{granularity:'grapheme'}).segment(text),x=>x.segment);
+    else{
+      if(/[\p{M}\u200d\ufe0f]/u.test(text))throw Error('This browser cannot safely split this text');
+      chars=Array.from(text);
+    }
+    const chunks=[];let pos=0;
+    while(pos<chars.length){
+      const prefix=header(chunks.length===0);
+      let part='';
+      while(pos<chars.length&&smsFits(prefix+part+chars[pos]))part+=chars[pos++];
+      if(!part)throw Error('A character does not fit in one independent SMS');
+      chunks.push(part);
+      if(chunks.length>SMS_MAX_PARTS)throw Error('Too many SMS parts (maximum '+SMS_MAX_PARTS+')');
+    }
+    return chunks;
+  }
+  async function makeSmsPlan(entry,grant,signer){
+    const text=String(entry.text||'');
+    const stamp=Math.floor(Date.parse(entry.event_at)/1000);
+    const now=Math.floor(Date.now()/1000);
+    if(!text.trim()||text.length>3000||text!==text.trim()||!Number.isSafeInteger(stamp)||stamp<0||stamp>=36**6)
+      throw Error('Invalid original LOG event');
+    if(!grant||grant.doc_id!==entry.doc_id||!/^\+[1-9][0-9]{7,14}$/.test(grant.phone||'')||
+      !/^[A-Za-z0-9_-]{8}$/.test(grant.alias||'')||!Number.isSafeInteger(grant.expires)||grant.expires<=now)
+      throw Error('SMS configuration is missing or expired. Refresh INFO while online.');
+    const id=smsUuid(entry.op_id),ts=stamp.toString(36).padStart(6,'0'),source=entry.source==='text'?'T':'V';
+    const fixed='DK1'+grant.alias+id;
+    const placeholder=first=>fixed+'0101'+(first?ts+source+'AAAAAAAAAAAAAAAA':'')+'\n';
+    const chunks=smsSegments(text,placeholder),count=chunks.length;
+    // HMAC covers exact UTF-8 text, grant/doc/operator scope, original UUID,
+    // UTC seconds, source and part count. Never signs individual partial text as complete.
+    const total=count.toString(36).padStart(2,'0');
+    const canonical='DK1|'+grant.alias+'|'+id+'|'+ts+'|'+source+'|'+total+'|'+text;
+    const keyBytes=smsBytes(grant.key||'');
+    if(keyBytes.length!==32)throw Error('Invalid SMS key');
+    let signature;
+    if(signer)signature=await signer(keyBytes,canonical);
+    else{
+      if(!window.crypto?.subtle||typeof TextEncoder!=='function')throw Error('Secure SMS signing is unavailable');
+      const key=await window.crypto.subtle.importKey('raw',keyBytes,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+      signature=new Uint8Array(await window.crypto.subtle.sign('HMAC',key,new TextEncoder().encode(canonical)));
+    }
+    const mac=smsB64(signature.slice(0,12));
+    if(mac.length!==16)throw Error('Invalid SMS signature');
+    const parts=chunks.map((chunk,i)=>{
+      const wire=fixed+(i+1).toString(36).padStart(2,'0')+total+(i===0?ts+source+mac:'')+'\n'+chunk;
+      if(!smsFits(wire))throw Error('SMS part is oversized');
+      return wire;
+    });
+    return {phone:grant.phone,doc_id:entry.doc_id,op_id:entry.op_id,expires:grant.expires,parts};
+  }
+  function smsComposerUrl(phone,text,ios){
+    if(!/^\+[1-9][0-9]{7,14}$/.test(phone))throw Error('Invalid SMS recipient');
+    return 'sms:'+phone+(ios?'&':'?')+'body='+encodeURIComponent(text);
+  }
   // One journal feed: an operation keeps the same identity from a local voice
   // recording through confirmation, upload and the first successful Sheets read.
   function journalEntries(queue,logs,docId,limit) {
@@ -552,6 +643,9 @@
     const [infoAdding,setInfoAdding]=useState(-1);
     const [infoRole,setInfoRole]=useState('');
     const [infoValues,setInfoValues]=useState([]);
+    const [smsDialog,setSmsDialog]=useState(null);
+    const [smsPreparing,setSmsPreparing]=useState(false);
+    const smsRequestRef=useRef(0);
     const [gallery,setGallery]=useState(null);
     const [galleryImage,setGalleryImage]=useState('');
     const [galleryBusy,setGalleryBusy]=useState(false);
@@ -962,6 +1056,7 @@
       clearReadRetry();documentRequestRef.current++;
       documentReadInFlightRef.current?.controller?.abort();
       documentReadInFlightRef.current=null;tabCacheRef.current.clear();
+      smsRequestRef.current++;setSmsDialog(null);setSmsPreparing(false);
       setReadActivity(false);setDocLoading(false);
     }
     function resetView(id,tab){
@@ -2205,6 +2300,43 @@
         await refreshQueue();if(doc)loadDocument(doc.id);
       }
     }
+    async function openSms(entry){
+      if(!CFG.sms_pilot||!entry||entry.kind!=='log'||entry.state==='cancelled'||entry.state==='conflict'||smsPreparing)return;
+      const id=docRef.current?.id,scope=DB,request=++smsRequestRef.current;
+      if(!id||entry.doc_id!==id)return;
+      setSmsPreparing(true);
+      try{
+        const info=currentTabEntry(id,'INFO');
+        // An authoritative in-memory INFO without a grant overrides an older
+        // cached grant. Only use the private snapshot if INFO is not loaded.
+        const snapshot=info?info.data:(await database('get','snapshots',tabSnapshotKey(id,'INFO')))?.data;
+        if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
+        const grant=snapshot?.SMS_PILOT;
+        const plan=await makeSmsPlan(entry,grant);
+        if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
+        setSmsDialog(Object.assign({},plan,{index:0,copyStatus:'',opened:[]}));
+      }catch(e){
+        if(scope===DB&&docRef.current?.id===id&&request===smsRequestRef.current)setError('SMS: '+(e.message||'Опресни INFO при интернет.'));
+      }finally{if(request===smsRequestRef.current)setSmsPreparing(false);}
+    }
+    function smsEligible(entry){
+      return CFG.sms_pilot&&entry&&entry.kind==='log'&&entry.doc_id===doc?.id&&
+        !['cancelled','conflict'].includes(entry.state)&&typeof entry.text==='string'&&entry.text.trim()&&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.op_id||'');
+    }
+    function smsAction(entry){
+      return smsEligible(entry)&&h(Button,{secondary:true,disabled:smsPreparing,onClick:()=>openSms(entry)},'SMS');
+    }
+    async function copySmsPart(){
+      if(!smsDialog)return;
+      const index=smsDialog.index,id=smsDialog.op_id,part=smsDialog.parts[index];
+      try{
+        await navigator.clipboard.writeText(part);
+        setSmsDialog(old=>old&&old.op_id===id&&old.index===index?Object.assign({},old,{copyStatus:'Копирано.'}):old);
+      }catch(e){
+        setSmsDialog(old=>old&&old.op_id===id?Object.assign({},old,{copyStatus:'Маркирай и копирай текста от полето.'}):old);
+      }
+    }
     const waiting=queue.filter(o=>o.state!=='synced'&&o.state!=='cancelled').length;
     const localSaveFailed=!!unsavedAudio;
     const queueAccessible=!!auth||CFG.auth_mode==='public';
@@ -2413,6 +2545,7 @@
                         'Записано в Google · очаква опресняване'):
                       h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
                     h('div',{className:'bv-event-controls'},
+                    smsAction(o),
                     (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
                     playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
                       icon('play',15),' Чуй оригинала'),
@@ -2437,6 +2570,7 @@
                   !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
                     h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано')),
                   h('div',{className:'bv-event-controls'},h('div',{className:'bv-event-photos'},
+                    !cancelled&&smsAction(queue.find(o=>o.doc_id===doc?.id&&o.op_id===c[6]&&o.kind==='log')),
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
                       icon('image',16),' Снимки (',(x.photos||[]).length,')'),
@@ -2460,6 +2594,12 @@
 
         ) : page==='INFO' ? h('section',{className:'bv-form-screen'},
           h('h2',null,B('Osnovni danni')),h('p',{className:'bv-muted'},B('Izberi pole, za da go promenish.')),
+          CFG.sms_pilot&&h('div',{className:'bv-card bv-sms-ready'},
+            h('strong',null,'SMS резервен канал · пилот'),
+            data?.SMS_PILOT&&data.SMS_PILOT.expires>Math.floor(Date.now()/1000)?
+              h('p',null,'Координатор: '+data.SMS_PILOT.phone+' · подготвен до '+new Date(data.SMS_PILOT.expires*1000).toLocaleString('bg-BG')):
+              h('p',null,'Не е подготвен. Нужни са валиден телефон, разрешен gateway и актуално INFO.'),
+            h('small',null,'Провери номера преди терен. Офлайн копието може да е остаряло.')),
           h(Button,{secondary:true,disabled:gpsBusy,onClick:usePhoneGPS},icon('map',17),' ',gpsBusy?'Определя GPS...':'GPS от телефона -> INFO / Локация'),
           data && Array.isArray(data.INFO_SECTIONS) && data.INFO_SECTIONS.length ?
             data.INFO_SECTIONS.map((section,sectionIndex)=>h('div',{className:'bv-info-section',key:sectionIndex},
@@ -2599,6 +2739,25 @@
           completedCount>0&&h('button',{className:'bv-retry-op',onClick:()=>setShowCompletedQueue(v=>!v)},
             showCompletedQueue?'Скрий приключените':'Покажи приключените ('+completedCount+')'),
           h(Button,{secondary:true,onClick:()=>setQueueOpen(false)},'Затвори'))),
+      smsDialog&&h('div',{className:'bv-modal-backdrop',onClick:()=>setSmsDialog(null)},
+        h('div',{className:'bv-modal bv-sms-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Изпращане по SMS'},
+          h('h3',null,'Изпрати събитие по SMS'),
+          h('p',null,'Координатор: '+smsDialog.phone),
+          h('p',{className:'bv-muted'},'Некриптиран текст. Не изпращай чувствителни лични или медицински данни. Провери номера.'),
+          h('strong',null,'Част '+(smsDialog.index+1)+' / '+smsDialog.parts.length+' · '+smsUnits(smsDialog.parts[smsDialog.index]).encoding),
+          smsDialog.parts.length>1&&h('p',{className:'bv-muted'},'Изпрати всяка част отделно. Получените части могат да се прочетат, но записът в Sheets чака всички.'),
+          h('textarea',{className:'bv-textarea bv-sms-wire',rows:5,readOnly:true,value:smsDialog.parts[smsDialog.index],onFocus:e=>e.target.select(),'aria-label':'SMS пакет'}),
+          h('div',{className:'bv-row'},
+            h(Button,{secondary:true,onClick:copySmsPart},'Копирай'),
+            smsDialog.expires>Math.floor(Date.now()/1000)&&h('a',{className:'bv-btn bv-sms-send',href:smsComposerUrl(smsDialog.phone,smsDialog.parts[smsDialog.index],iosInstallDevice()),
+              onClick:()=>setSmsDialog(old=>old&&Object.assign({},old,{opened:Array.from(new Set([...old.opened,old.index]))}))},'Отвори SMS')),
+          smsDialog.copyStatus&&h('small',null,smsDialog.copyStatus),
+          h('small',{className:'bv-muted'},'Отваряни части: '+smsDialog.opened.length+'/'+smsDialog.parts.length+'. Това не потвърждава изпращане. Избери SMS, не RCS/iMessage.'),
+          h('div',{className:'bv-row'},
+            h(Button,{secondary:true,disabled:smsDialog.index===0,onClick:()=>setSmsDialog(old=>Object.assign({},old,{index:old.index-1,copyStatus:''}))},'Предишна'),
+            h(Button,{secondary:true,disabled:smsDialog.index>=smsDialog.parts.length-1,onClick:()=>setSmsDialog(old=>Object.assign({},old,{index:old.index+1,copyStatus:''}))},'Следваща'),
+            h(Button,{secondary:true,onClick:()=>setSmsDialog(null)},'Затвори')),
+          h('small',null,'Оригиналният запис остава в опашката до потвърждение от Google Sheets.'))),
       logEditor&&h('div',{className:'bv-modal-backdrop',onClick:()=>setLogEditor(null)},
         h('div',{className:'bv-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Редакция на LOG събитие'},
           h('h3',null,'Редактирай събитието'),

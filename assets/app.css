@@ -343,3 +343,10 @@
 #bvlog-root .bv-read-indicator.active .bv-loading-spinner{animation:bv-v062-spin .85s linear infinite}
 #bvlog-root .bv-sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 @media(prefers-reduced-motion:reduce){#bvlog-root .bv-read-indicator.active .bv-loading-spinner{animation:none;border-color:#2379a9}}
+
+/* SMS pilot: separate readable pieces; no automatic sending or false ACK. */
+#bvlog-root .bv-sms-modal{max-width:540px;max-height:92vh;overflow-y:auto;gap:12px}
+#bvlog-root .bv-sms-modal .bv-row{flex-wrap:wrap}
+#bvlog-root .bv-sms-wire{width:100%;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text}
+#bvlog-root .bv-sms-send{display:inline-flex;justify-content:center;align-items:center;text-decoration:none}
+#bvlog-root .bv-sms-ready{display:grid;gap:6px;margin-bottom:12px}
