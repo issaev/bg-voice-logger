@@ -146,7 +146,11 @@ class BVLOG_SMS {
     public static function decorate($result,$doc) {
         if(!self::test_doc($doc)||is_wp_error($result)||!method_exists($result,'get_data'))return $result;
         $out=$result->get_data();
-        if(empty($out['ok'])||($out['backend_version']??'')!=='0.8.3'||
+        $fenced=class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc);
+        $valid=$fenced?(BVLOG_Direct_Write::sms_ready($doc)&&
+            in_array($out['read_meta']['backend']??'',array('sheets_api','server_cache'),true)):
+            ($out['backend_version']??'')==='0.8.3';
+        if(empty($out['ok'])||!$valid||($out['id']??'')!==$doc||
             !is_array($out['data']['INFO_SECTIONS']??null))return $result;
         $phone=self::coordinator($out['data']);$identity=BVLOG_Auth::identity();
         if(!$phone||!$identity||!in_array($identity['kind']??'',array('google','wordpress'),true))return $result;
@@ -289,18 +293,25 @@ class BVLOG_SMS {
         $check=self::get($rid);
         if(($check['status']??'')==='REVIEW')return $review();
         if(($check['status']??'')==='APPLIED')return rest_ensure_response(array('ok'=>true,'status'=>'SHEETS_CONFIRMED'));
-        // Recheck the current INFO role and required GAS revision before write.
-        $info=BVLOG_API::forward('read',array('doc_id'=>$g['doc_id'],'tab'=>'INFO'));
-        if(is_wp_error($info)||!method_exists($info,'get_data'))return self::err('google');
-        $snapshot=$info->get_data();
-        if(empty($snapshot['ok'])||($snapshot['backend_version']??'')!=='0.8.3')return self::err('backend');
-        if(self::coordinator($snapshot['data']??array())!==$g['phone'])return $review();
+        // Legacy incidents retain their verified GAS INFO path. A direct
+        // incident checks live INFO inside the same incident writer lock.
+        $direct=class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($g['doc_id']);
+        if($direct){
+            if(!BVLOG_Direct_Write::sms_ready($g['doc_id']))return self::err('backend');
+        }else{
+            $info=BVLOG_API::forward('read',array('doc_id'=>$g['doc_id'],'tab'=>'INFO'));
+            if(is_wp_error($info)||!method_exists($info,'get_data'))return self::err('google');
+            $snapshot=$info->get_data();
+            if(empty($snapshot['ok'])||($snapshot['backend_version']??'')!=='0.8.3')return self::err('backend');
+            if(self::coordinator($snapshot['data']??array())!==$g['phone'])return $review();
+        }
         // Credentials and allowlists might have changed while Google was busy.
         if(!self::grant($alias))return self::err('grant',403);
         $when=gmdate('Y-m-d\TH:i:s\Z',$event);$kind=$source==='T'?'text':'voice';
         $body=array('kind'=>'log','doc_id'=>$g['doc_id'],'op_id'=>$first['op_id'],
             'author'=>$g['name'],'text'=>$text,'source'=>$kind,'event_at'=>$when,'transport'=>'sms',
             'payload_hash'=>self::log_hash($g['doc_id'],$first['op_id'],$when,$kind,$text,self::actor($g)));
+        if($direct)$body['sms_alias']=$alias; // server-only authenticated grant reference
         $result=BVLOG_API::forward('operation',$body);
         if(is_wp_error($result)||!method_exists($result,'get_data'))return self::err('google');
         $ack=$result->get_data();
@@ -310,6 +321,59 @@ class BVLOG_SMS {
         }
         self::status($rid,'APPLIED');
         return rest_ensure_response(array('ok'=>true,'status'=>'SHEETS_CONFIRMED'));
+    }
+    /** Internal only: webhook has already authenticated the complete DK1
+     * packet. Revalidate the grant and coordinator under the direct SQL
+     * incident lock, using live Sheets, never a shared INFO snapshot.
+     */
+    public static function authorize_direct($p,$google,$meta){
+        $doc=$p['doc_id']??'';
+        $alias=$p['sms_alias']??'';
+        if(!is_string($alias)||!preg_match('/^[A-Za-z0-9_-]{8}$/D',$alias)||
+            !self::test_doc($doc)||!BVLOG_Direct_Write::sms_ready($doc))
+            throw new BVLOG_Direct_Error('sms_grant',403);
+        $g=self::grant($alias);
+        if(!$g||$g['doc_id']!==$doc)throw new BVLOG_Direct_Error('sms_grant',403);
+        $hash=self::log_hash($doc,$p['op_id'],$p['event_at'],$p['source'],$p['text'],self::actor($g));
+        if(!$hash||!hash_equals($hash,$p['payload_hash'])||$g['name']!==$p['author'])
+            throw new BVLOG_Log_Plan_Error('sms_conflict');
+        $info=$google->read($doc,'INFO',$meta);
+        if(($info['ok']??false)!==true||($info['id']??'')!==$doc||
+            !is_array($info['data']['INFO_SECTIONS']??null))
+            throw new BVLOG_Direct_Error('sms_info');
+        if(self::coordinator($info['data'])!==$g['phone'])
+            throw new BVLOG_Log_Plan_Error('sms_conflict');
+        // Revocation between fetching the snapshot and dispatch is checked again.
+        if(!self::grant($alias))throw new BVLOG_Direct_Error('sms_grant',403);
+    }
+
+    /** Optional bounded retry of durably received complete packets. WP cron
+     * needs actual traffic or a system cron; this is not a delivery guarantee.
+     * Do not retry partial groups, REVIEW, or expired grants.
+     */
+    public static function cron_schedules($schedules){
+        $schedules['bvlog_sms_retry_5m']=array('interval'=>300,'display'=>'BG Voice Logger SMS retry (5 min)');
+        return $schedules;
+    }
+    public static function schedule_retry(){
+        if(!self::enabled()||!defined('BVLOG_SMS_RETRY_CRON')||BVLOG_SMS_RETRY_CRON!==true)return;
+        if(!wp_next_scheduled('bvlog_sms_retry_received'))
+            wp_schedule_event(time()+60,'bvlog_sms_retry_5m','bvlog_sms_retry_received');
+    }
+    public static function retry_received(){
+        if(!self::enabled()||!defined('BVLOG_SMS_RETRY_CRON')||BVLOG_SMS_RETRY_CRON!==true)return;
+        global $wpdb;$table=self::table();
+        $row=$wpdb->get_row($wpdb->prepare("SELECT id,payload FROM $table WHERE kind='receipt'
+            AND status='RECEIVED' AND expires>%d AND updated<%d ORDER BY updated ASC LIMIT 1",time(),time()-120),ARRAY_A);
+        if(!is_array($row))return;
+        $p=self::payload($row);$alias=$p['alias']??'';$id=$p['id']??'';
+        if(!is_string($alias)||!preg_match('/^[A-Za-z0-9_-]{8}$/D',$alias)||
+            !is_string($id)||!preg_match('/^[A-Za-z0-9_-]{22}$/D',$id))return;
+        // Touch timestamp only, never regress REVIEW or APPLIED.
+        $n=$wpdb->query($wpdb->prepare("UPDATE $table SET updated=%d WHERE id=%s
+            AND status='RECEIVED' AND updated<%d",time(),$row['id'],time()-120));
+        if($n!==1)return;
+        try{self::attempt($alias,$id);}catch(Throwable $ignore){}
     }
     public static function admin_retry() {
         if(!current_user_can('manage_options')||!self::enabled())wp_die('SMS pilot unavailable');

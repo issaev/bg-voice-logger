@@ -45,6 +45,10 @@ final class BVLOG_Direct_Write {
             throw new BVLOG_Direct_Error('write_fence_unverified');
         return $cfg;
     }
+    public static function sms_ready($doc){
+        if(!self::fenced($doc)||!BVLOG_Direct_Read::approved($doc,'INFO'))return false;
+        try{self::ready($doc);return true;}catch(Throwable $e){return false;}
+    }
     public static function operation($p){
         $doc=$p['doc_id']??'';
         try{
@@ -65,8 +69,13 @@ final class BVLOG_Direct_Write {
             if(($p['transport']??'')!=='sms'&&!BVLOG_Auth::identity())
                 throw new BVLOG_Direct_Error('login_required',401);
             $google=new BVLOG_Google_Log_Write_Transport($cfg,24);
+            $authorize=null;
+            if(($p['transport']??'')==='sms'){
+                if($kind!=='log'||!class_exists('BVLOG_SMS'))throw new BVLOG_Direct_Error('sms_grant',403);
+                $authorize=function($transport,$meta)use($p){BVLOG_SMS::authorize_direct($p,$transport,$meta);};
+            }
             $ack=BVLOG_Direct_Log_Engine::run($doc,$p,$google,new BVLOG_Direct_Write_Ledger(),
-                new BVLOG_Direct_Write_Cache(),new DateTimeImmutable('now',new DateTimeZone('UTC')));
+                new BVLOG_Direct_Write_Cache(),new DateTimeImmutable('now',new DateTimeZone('UTC')),$authorize);
             $response=rest_ensure_response($ack+array('write_backend'=>$kind==='log'?'direct_log_v1':'direct_sheet_v1'));
             $response->header('Cache-Control','private, no-store, max-age=0');
             return $response;
@@ -74,7 +83,7 @@ final class BVLOG_Direct_Write {
             return rest_ensure_response(array('ok'=>false,'code'=>$e->getMessage(),'message'=>'Value or row changed. Refresh before editing.',
                 'current'=>$e->current,'row'=>$e->row));
         }catch(BVLOG_Log_Plan_Error $e){
-            $code=in_array($e->getMessage(),array('write_review','write_headers','write_shape','log_input','write_unsupported','protected_range','validation_type','validation_choice'),true)?$e->getMessage():'write_shape';
+            $code=in_array($e->getMessage(),array('write_review','write_headers','write_shape','log_input','write_unsupported','protected_range','validation_type','validation_choice','sms_conflict'),true)?$e->getMessage():'write_shape';
             return rest_ensure_response(array('ok'=>false,'code'=>$code,
                 'message'=>'Direct LOG pilot: '.$code.'. Keep the original operation ID; ask an administrator.'));
         }catch(Throwable $e){

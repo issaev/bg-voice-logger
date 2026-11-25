@@ -193,6 +193,9 @@ add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 1
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('rest_api_init', array('BVLOG_SMS', 'register_routes'));
 add_action('admin_init', array('BVLOG_SMS', 'install'));
+add_filter('cron_schedules', array('BVLOG_SMS', 'cron_schedules'));
+add_action('init', array('BVLOG_SMS', 'schedule_retry'));
+add_action('bvlog_sms_retry_received', array('BVLOG_SMS', 'retry_received'));
 add_action('admin_init', array('BVLOG_Direct_Read', 'install'));
 add_action('admin_init', array('BVLOG_Direct_Write', 'install'));
 add_action('admin_post_bvlog_verify_write_fence', array('BVLOG_Direct_Write', 'verify_fence'));
