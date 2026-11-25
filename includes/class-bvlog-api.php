@@ -164,6 +164,8 @@ class BVLOG_API {
         return $m;
     }
     public static function forward($action, $payload = array()) {
+        if($action==='operation'&&class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($payload['doc_id']??''))
+            return BVLOG_Direct_Write::operation($payload); // never a GAS mutation fallback
         $guard=null;$result=null;
         if($action==='operation'&&class_exists('BVLOG_Direct_Read')){
             $guard=BVLOG_Direct_Read::begin_mutation($payload['doc_id']??'');
@@ -319,9 +321,15 @@ class BVLOG_API {
     }
     private static function operation_author($payload) {
         $identity=BVLOG_Auth::identity();
-        if ($identity && ($identity['kind'] ?? '')!=='public') return substr(sanitize_text_field($identity['name'] ?? ''),0,80);
+        if ($identity && ($identity['kind'] ?? '')!=='public') return self::author_name($identity['name'] ?? '');
         $name=trim(sanitize_text_field($payload['author']??''));
-        return $name!==''?substr($name,0,80):'Guest operator';
+        return $name!==''?self::author_name($name):'Guest operator';
+    }
+    public static function author_name($name){
+        $name=sanitize_text_field((string)$name);
+        if(function_exists('mb_substr'))return mb_substr($name,0,80,'UTF-8');
+        if(preg_match('/^.{0,80}/us',$name,$m))return $m[0];
+        return '';
     }
     public static function audio_view($request) {
         $doc = sanitize_text_field((string)$request->get_param('doc_id'));
@@ -543,6 +551,9 @@ class BVLOG_API {
             $body['base'] = sanitize_textarea_field($p['base'] ?? '');
             $body['value'] = sanitize_textarea_field($p['value'] ?? '');
             $body['row_key'] = sanitize_text_field($p['row_key'] ?? '');
+            $body['section'] = absint($p['section'] ?? 0);
+            $body['field_label'] = sanitize_text_field($p['field_label'] ?? '');
+            $body['header_label'] = sanitize_text_field($p['header_label'] ?? '');
             $body['force_base'] = isset($p['force_base']) ? sanitize_textarea_field($p['force_base']) : null;
         } else {
             $sheet = strtoupper(sanitize_key($p['sheet'] ?? ''));
@@ -551,6 +562,12 @@ class BVLOG_API {
             $vals = (array)($p['values'] ?? array());
             $body['values'] = array_map('sanitize_text_field', array_slice(array_values($vals), 0, 8));
             if (count(array_filter($body['values'])) === 0) { return new WP_Error('bvlog_values', 'A new row cannot be empty.', array('status' => 400)); }
+        }
+        if($kind!=='log'&&class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc_id)){
+            $identity=BVLOG_Auth::identity();
+            if(!$identity||!in_array($identity['kind']??'',array('google','wordpress'),true))
+                return new WP_Error('bvlog_login_required','Login required.',array('status'=>401));
+            $body['payload_hash']=hash('sha256',BVLOG_Direct_Crypto::json(array($identity['kind'],$identity['sub']??'', $body)));
         }
         return self::forward('operation', $body);
     }

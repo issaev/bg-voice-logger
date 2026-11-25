@@ -90,6 +90,11 @@ final class BVLOG_Direct_Read {
      */
     private static function direct($doc,$tab,$cfg,$google,$useCache,$force){
         $meta=$google->metadata($doc);
+        // A SQL dispatch reservation is durable, unlike the 10-minute
+        // read-cache marker. Do not publish snapshots while it is unresolved.
+        if(class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc)&&
+            BVLOG_Direct_Write_Ledger::installed()&&(new BVLOG_Direct_Write_Ledger())->active($doc)!==null)
+            throw new BVLOG_Direct_Error('write_pending');
         $key=BVLOG_Read_Cache::doc_key($doc);$state=BVLOG_Read_Cache::state($key);
         if($state['pending'])throw new BVLOG_Direct_Error('write_pending');
         if($useCache&&!$force&&$cfg['ttl']>0){
@@ -127,9 +132,11 @@ final class BVLOG_Direct_Read {
     public static function document($doc,$tab,$force=false){
         if(self::mode()!=='direct'||!self::selected($doc)||!in_array($tab,BVLOG_Read_Projection::TABS,true)||!self::approved($doc,$tab))return null;
         if(!BVLOG_Auth::identity())return new WP_Error('bvlog_login_required','Login required.',array('status'=>401));
-        // The per-operator SMS grant is produced by the verified GAS INFO path.
-        // It must never be stored in a shared cache.
-        if($tab==='INFO'&&class_exists('BVLOG_SMS')&&BVLOG_SMS::test_doc($doc))return null;
+        // Keep legacy SMS fixtures on the previous INFO path. Fenced
+        // direct fixtures decorate only the final, authorized response.
+        $sms=$tab==='INFO'&&class_exists('BVLOG_SMS')&&BVLOG_SMS::test_doc($doc);
+        $fenced=class_exists('BVLOG_Direct_Write')&&BVLOG_Direct_Write::fenced($doc);
+        if($sms&&!$fenced)return null;
         try{
             $cfg=self::config();$google=new BVLOG_Google_Read_Transport($cfg);
             // Opportunistically remove expired pilot snapshots/markers, never
@@ -139,7 +146,7 @@ final class BVLOG_Direct_Read {
             catch(Throwable $e){
                 $reason=$e instanceof BVLOG_Read_Unsupported?'unsupported_shape':
                     ($e instanceof BVLOG_Direct_Error&&$e->getMessage()==='write_pending'?'write_pending':'');
-                if($reason==='')throw $e;
+                if($reason===''||$fenced)throw $e; // direct fixtures never silently switch backend
                 // Re-authorize against live Drive before the only two allowed
                 // fallbacks. Do not cache the fallback response.
                 $google->metadata($doc);
@@ -152,7 +159,7 @@ final class BVLOG_Direct_Read {
             }
             $response=rest_ensure_response($r);
             $response->header('Cache-Control','private, no-store, max-age=0');
-            return $response;
+            return $sms?BVLOG_SMS::decorate($response,$doc):$response;
         }catch(Throwable $e){return self::error($e);}
     }
     private static function ordered($v){

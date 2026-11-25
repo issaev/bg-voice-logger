@@ -5,7 +5,7 @@ require_once __DIR__.'/class-bvlog-direct-scope.php';
 /** #46: read-only Google API transport, isolated alpha. No browser tokens,
  * no Google mutation methods, no domain-wide delegation, no raw error logging.
  */
-final class BVLOG_Direct_Error extends RuntimeException {
+class BVLOG_Direct_Error extends RuntimeException {
     public $status,$scope_reason;
     public function __construct($category,$status=503,$scope_reason=''){parent::__construct($category);$this->status=$status;$this->scope_reason=$scope_reason;}
 }
@@ -31,10 +31,12 @@ final class BVLOG_Direct_Crypto {
         return $plain===false?null:json_decode($plain,true);
     }
 }
-final class BVLOG_Google_Read_Transport {
+class BVLOG_Google_Read_Transport {
     const SCOPES='https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.metadata.readonly';
     const MAX_BYTES=2097152;
-    private $cfg,$deadline,$token='';
+    protected $cfg;
+    private $deadline,$token='';
+    protected function scopes(){return self::SCOPES;}
     public $metrics=array('drive_calls'=>0,'sheets_calls'=>0,'token_calls'=>0,'drive_ms'=>0,'sheets_ms'=>0,'token_ms'=>0,'response_bytes'=>0);
     public function __construct($cfg,$budget=18){$this->cfg=$cfg;$this->deadline=microtime(true)+$budget;}
     public static function valid_id($s){return BVLOG_Direct_Scope::valid_id($s);}
@@ -66,7 +68,7 @@ final class BVLOG_Google_Read_Transport {
         if(!preg_match('/^[0-9]{1,30}$/D',(string)$v))throw new BVLOG_Direct_Error('drive_version');
         return array('version'=>(string)$v,'name'=>$file['name']);
     }
-    private function budget(){
+    protected function budget(){
         $left=$this->deadline-microtime(true);
         if($left<1)throw new BVLOG_Direct_Error('read_deadline');
         return min(8,$left);
@@ -105,15 +107,20 @@ final class BVLOG_Google_Read_Transport {
         if(!is_array($v))throw new BVLOG_Direct_Error('google_json');
         return $v;
     }
-    private function token_key(){return 'bvlog_dr_token_'.substr($this->cfg['credential']['fingerprint'],0,32);}
-    private function token(){
+    private function token_key(){
+        $key='bvlog_dr_token_'.substr($this->cfg['credential']['fingerprint'],0,32);
+        // Preserve the legacy read token cache; write-scoped tokens can never
+        // be used by the read-only transport, even with the same credentials.
+        return $this->scopes()===self::SCOPES?$key:$key.'_'.substr(hash('sha256',$this->scopes()),0,16);
+    }
+    protected function token(){
         if($this->token!=='')return $this->token;
         $key=$this->token_key();$cached=BVLOG_Direct_Crypto::open(get_transient($key),$key);
         if(is_array($cached)&&($cached['expires']??0)>time()+60&&is_string($cached['token']??null))
             return $this->token=$cached['token'];
         $c=$this->cfg['credential'];$now=time();
         $header=array('alg'=>'RS256','typ'=>'JWT');if($c['kid']!=='')$header['kid']=$c['kid'];
-        $claims=array('iss'=>$c['email'],'scope'=>self::SCOPES,'aud'=>'https://oauth2.googleapis.com/token',
+        $claims=array('iss'=>$c['email'],'scope'=>$this->scopes(),'aud'=>'https://oauth2.googleapis.com/token',
             'iat'=>$now-5,'exp'=>$now+3500);
         $unsigned=BVLOG_Direct_Crypto::b64(BVLOG_Direct_Crypto::json($header)).'.'.BVLOG_Direct_Crypto::b64(BVLOG_Direct_Crypto::json($claims));
         $signature='';
@@ -130,7 +137,7 @@ final class BVLOG_Google_Read_Transport {
         set_transient($key,BVLOG_Direct_Crypto::seal(array('token'=>$this->token,'expires'=>time()+$ttl),$key),$ttl);
         return $this->token;
     }
-    private function get($kind,$url,$params,$ranges=array()){
+    protected function get($kind,$url,$params,$ranges=array()){
         $query=http_build_query($params,'','&',PHP_QUERY_RFC3986);
         foreach($ranges as $range)$query.='&ranges='.rawurlencode($range);
         return $this->request($kind,$url.'?'.$query,array('headers'=>array('Accept'=>'application/json',
@@ -232,6 +239,13 @@ final class BVLOG_Read_Cache {
           VALUES (%s,%s,'writer','','','',%d,%d,%d)",$id,$key,$now,$now+600,$now));
         if($ok!==1)throw new BVLOG_Direct_Error('cache_storage');
         self::rotate($key);return array('id'=>$id,'key'=>$key);
+    }
+    public static function clear_direct_writers($key){
+        // Only under the fenced incident's SQL writer lock, after reconciliation.
+        self::rotate($key);
+        global $wpdb;$table=self::table();
+        if($wpdb->query($wpdb->prepare("DELETE FROM $table WHERE doc_key=%s AND kind='writer'",$key))===false)
+            throw new BVLOG_Direct_Error('cache_storage');
     }
     public static function end_write($guard,$confirmed){
         // On uncertain commit/timeouts, keep the writer marker until expiry.

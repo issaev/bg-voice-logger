@@ -3,7 +3,7 @@
  * Plugin Name: BG Voice Logger
  * Plugin URI: https://example.invalid/bg-voice-logger
  * Description: Field-first voice operations journal for Google Sheets with offline queue and Apps Script bridge.
- * Version: 0.9.0-alpha.2
+ * Version: 0.9.0-beta.1
  * Requires at least: 6.0
  * Requires PHP: 7.4
  * Author: BG Voice Logger Project
@@ -13,7 +13,7 @@
 
 if (!defined('ABSPATH')) { exit; }
 
-define('BVLOG_VERSION', '0.9.0-alpha.2');
+define('BVLOG_VERSION', '0.9.0-beta.1');
 define('BVLOG_DIR', plugin_dir_path(__FILE__));
 define('BVLOG_URL', plugin_dir_url(__FILE__));
 
@@ -60,6 +60,12 @@ require_once BVLOG_DIR . 'includes/class-bvlog-sms.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-read-projection.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-google-read.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-direct-read.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-plan.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-sheet-plan.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-google-log-write.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-log-engine.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-write-ledger.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-direct-write.php';
 
 function bvlog_defaults() {
     return array(
@@ -187,7 +193,12 @@ add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 1
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
 add_action('rest_api_init', array('BVLOG_SMS', 'register_routes'));
 add_action('admin_init', array('BVLOG_SMS', 'install'));
+add_filter('cron_schedules', array('BVLOG_SMS', 'cron_schedules'));
+add_action('init', array('BVLOG_SMS', 'schedule_retry'));
+add_action('bvlog_sms_retry_received', array('BVLOG_SMS', 'retry_received'));
 add_action('admin_init', array('BVLOG_Direct_Read', 'install'));
+add_action('admin_init', array('BVLOG_Direct_Write', 'install'));
+add_action('admin_post_bvlog_verify_write_fence', array('BVLOG_Direct_Write', 'verify_fence'));
 add_action('rest_api_init', array('BVLOG_Direct_Read', 'register_routes'));
 add_filter('rest_post_dispatch', function($response,$server,$request){
     if(preg_match('~^/bvlog/v1/(document/|performance-probe$)~',$request->get_route()))
