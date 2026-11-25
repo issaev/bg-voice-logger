@@ -118,6 +118,7 @@ test(!BVLOG_Read_Cache::stable($state,array_replace($state,array('generation'=>s
 test(BVLOG_Direct_Read::differences(array('FIELD_AUDIO'=>(object)array(),'LOG'=>array('1')),array('FIELD_AUDIO'=>array(),'LOG'=>array('1')))===array(),'normalized parity');
 test(BVLOG_Direct_Read::differences(array('LOG'=>array('1')),array('LOG'=>array(1)))===array('LOG'),'strict comparison');
 test(BVLOG_Direct_Read::mode()==='off'&&BVLOG_Direct_Read::document($doc,'LOG')===null,'default GAS route unchanged');
+test(!BVLOG_Direct_Read::approved($doc,'LOG'),'explicit per-tab approval required');
 
 $pk=openssl_pkey_new(array('private_key_bits'=>2048,'private_key_type'=>OPENSSL_KEYTYPE_RSA));
 test($pk!==false&&openssl_pkey_export($pk,$pem),'synthetic test signing key');

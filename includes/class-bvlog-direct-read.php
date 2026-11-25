@@ -16,6 +16,10 @@ final class BVLOG_Direct_Read {
     public static function selected($doc){
         return self::mode()!=='off'&&in_array($doc,self::docs(),true);
     }
+    public static function approved($doc,$tab){
+        $approved=defined('BVLOG_DIRECT_APPROVED_TABS')&&is_array(BVLOG_DIRECT_APPROVED_TABS)?BVLOG_DIRECT_APPROVED_TABS:array();
+        return isset($approved[$doc])&&is_array($approved[$doc])&&in_array($tab,$approved[$doc],true);
+    }
     public static function install(){
         if(self::mode()!=='off'&&self::docs()&&current_user_can('manage_options')){
             BVLOG_Read_Cache::install();BVLOG_Read_Cache::cleanup();
@@ -121,7 +125,7 @@ final class BVLOG_Direct_Read {
         }finally{BVLOG_Read_Cache::unlock($lock);}
     }
     public static function document($doc,$tab,$force=false){
-        if(self::mode()!=='direct'||!self::selected($doc)||!in_array($tab,BVLOG_Read_Projection::TABS,true))return null;
+        if(self::mode()!=='direct'||!self::selected($doc)||!in_array($tab,BVLOG_Read_Projection::TABS,true)||!self::approved($doc,$tab))return null;
         if(!BVLOG_Auth::identity())return new WP_Error('bvlog_login_required','Login required.',array('status'=>401));
         // The per-operator SMS grant is produced by the verified GAS INFO path.
         // It must never be stored in a shared cache.
@@ -195,9 +199,11 @@ final class BVLOG_Direct_Read {
         $started=microtime(true);$google=null;$gasMetrics=array();
         $out=array('ok'=>false,'mode'=>$mode,'tab'=>$tab,'wp_version'=>BVLOG_VERSION,'utc'=>gmdate('c'));
         try{
-            $cfg=self::config();$google=new BVLOG_Google_Read_Transport($cfg);
+            $cfg=self::config();$google=new BVLOG_Google_Read_Transport($cfg,$mode==='compare'?60:18);
             if($mode==='check'){
-                $google->metadata($doc);
+                $google->metadata($doc);$google->check_sheet_access($doc);
+                $lease=BVLOG_Read_Cache::lock(BVLOG_Read_Cache::doc_key($doc));
+                BVLOG_Read_Cache::unlock($lease);
                 $ping=BVLOG_API::forward('ping');
                 $version=!is_wp_error($ping)?($ping->get_data()['version']??''):'';
                 if(!in_array($version,array('0.8.2','0.8.3'),true))throw new BVLOG_Direct_Error('verify_gas_revision');
@@ -248,13 +254,24 @@ final class BVLOG_Direct_Read {
         echo '<label>Samples <select id="bvlog-perf-n"><option>1</option><option>10</option><option>40</option></select></label> ';
         echo '<label>Concurrent requests <select id="bvlog-perf-c"><option>1</option><option>5</option><option>10</option></select></label> ';
         echo '<button type="button" class="button" id="bvlog-perf-run">Run probe</button> <button type="button" class="button" id="bvlog-perf-export" disabled>Export JSON</button>';
-        echo '<p id="bvlog-perf-status" role="status"></p><textarea readonly id="bvlog-perf-output" rows="12" style="width:100%"></textarea></div>';
+        echo '<p id="bvlog-perf-status" role="status"></p><pre id="bvlog-perf-summary" style="white-space:pre-wrap"></pre><textarea readonly id="bvlog-perf-output" rows="12" style="width:100%"></textarea></div>';
         $config=array('url'=>rest_url('bvlog/v1/performance-probe'),'nonce'=>wp_create_nonce('wp_rest'));
         echo '<script>(function(cfg){"use strict";
 const by=id=>document.getElementById("bvlog-perf-"+id),run=by("run"),out=by("output"),status=by("status"),exp=by("export");
 let results=[],checked="";
 const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-function report(){out.value=JSON.stringify(results,null,2);exp.disabled=!results.length;}
+function report(){
+out.value=JSON.stringify(results,null,2);exp.disabled=!results.length;
+const groups={};for(const r of results){const k=[r.slot,r.tab,r.mode,r.concurrency,r.backend||"error"].join(" / ");(groups[k]||(groups[k]=[])).push(r);}
+const summary=[];for(const [k,rs] of Object.entries(groups)){
+const good=rs.filter(x=>x.ok&&Number.isFinite(x.client_ms)),v=good.map(x=>x.client_ms).sort((a,b)=>a-b);
+const median=v.length?(v[Math.floor((v.length-1)/2)]+v[Math.ceil((v.length-1)/2)])/2:null;
+summary.push({group:k,n:rs.length,errors:rs.length-good.length,p50_client_ms:median,max_client_ms:v.length?v[v.length-1]:null,
+p95_client_ms:v.length>=40?v[Math.ceil(v.length*0.95)-1]:null,
+mean_sheets_calls:good.length?good.reduce((s,x)=>s+(x.google?.sheets_calls||0),0)/good.length:null,
+mean_drive_calls:good.length?good.reduce((s,x)=>s+(x.google?.drive_calls||0),0)/good.length:null});}
+by("summary").textContent=JSON.stringify(summary,null,2);
+}
 exp.onclick=()=>{const blob=new Blob([JSON.stringify(results,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);
 const a=document.createElement("a");a.href=url;a.download="bvlog-direct-benchmark.json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 async function probe(doc,tab,mode,slot,concurrency){const t=performance.now();

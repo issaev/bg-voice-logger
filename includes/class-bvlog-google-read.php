@@ -148,8 +148,11 @@ final class BVLOG_Google_Read_Transport {
     private function sheet($doc,$fields,$ranges=array()){
         return $this->get('sheets','https://sheets.googleapis.com/v4/spreadsheets/'.rawurlencode($doc),array('fields'=>$fields),$ranges);
     }
+    public function check_sheet_access($doc){
+        return BVLOG_Read_Projection::sheets($this->sheet($doc,'spreadsheetId,sheets(properties(title,sheetType,gridProperties(rowCount,columnCount)))'),$doc);
+    }
     public function read($doc,$tab,$meta){
-        $sheets=BVLOG_Read_Projection::sheets($this->sheet($doc,'spreadsheetId,sheets(properties(title,sheetType,gridProperties(rowCount,columnCount)))'),$doc);
+        $sheets=$this->check_sheet_access($doc);
         $plan=BVLOG_Read_Projection::plan($sheets,$tab);$values=array();$info=array();
         if($plan['ranges']){
             $raw=$this->get('sheets','https://sheets.googleapis.com/v4/spreadsheets/'.rawurlencode($doc).'/values:batchGet',
