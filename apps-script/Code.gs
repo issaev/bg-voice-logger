@@ -528,7 +528,7 @@ function bvlStamp_(meta, p, result) {
   const receipt=Object.assign({},result);
   if(p.kind==='log'&&/^[a-f0-9]{64}$/.test(String(p.payload_hash||'')))
     receipt.payload_hash=p.payload_hash;
-  if(p.kind==='log'&&p.transport==='sms')receipt.transport='sms';
+  if(p.kind==='log'&&p.transport==='sms'){receipt.transport='sms';receipt.source=p.source;}
   meta.appendRow([p.op_id, p.kind, new Date().toISOString(), p.author || '', JSON.stringify(receipt).slice(0,1000)]);
 }
 function bvlOriginalLogHash_(meta,opId) {

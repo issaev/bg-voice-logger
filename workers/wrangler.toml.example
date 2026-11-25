@@ -15,6 +15,16 @@ binding = "AI"
 binding = "STT_NONCES"
 id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
 
+# Atomic one-use STT ticket reservation. Merge into the site's actual config;
+# do not replace real namespace IDs, secrets, issuer or other existing migrations.
+[[durable_objects.bindings]]
+name = "STT_NONCE_GUARD"
+class_name = "STTNonceGuard"
+
+[[migrations]]
+tag = "stt-nonce-v1"
+new_sqlite_classes = ["STTNonceGuard"]
+
 # Approximate per-user limit, backed by Workers Rate Limiting.
 [[ratelimits]]
 name = "STT_RATE_LIMIT"
