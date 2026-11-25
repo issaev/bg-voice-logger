@@ -3,6 +3,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../apps-script/Code.gs','utf8');
 class Range {
   constructor(sh,r,c,n,m){this.sh=sh;this.r=r;this.c=c;this.n=n;this.m=m;}
+  getDataValidation(){return null;}
   getValues(){return Array.from({length:this.n},(_,i)=>Array.from({length:this.m},(_,j)=>this.sh.get(this.r+i,this.c+j)));}
   getDisplayValues(){return this.getValues().map(row=>row.map(x=>x==null?'':String(x)));}
   getDisplayValue(){return String(this.sh.get(this.r,this.c)||'');}
@@ -19,6 +20,7 @@ class Sheet {
   constructor(name){this.name=name;this.grid=Array.from({length:1000},()=>Array(30).fill(''));this.hidden=false;this.rich={};}
   set(r,c,v){this.grid[r-1][c-1]=v;}get(r,c){return this.grid[r-1]?.[c-1]??'';}
   getRange(a,b,n,m){let r,c;if(typeof a==='string'){const x=a.match(/^([A-Z]+)(\d+)(?::([A-Z]+)(\d+))?$/);if(!x)throw Error('bad A1 '+a);c=x[1].split('').reduce((v,t)=>v*26+t.charCodeAt(0)-64,0);r=Number(x[2]);n=x[4]?Number(x[4])-r+1:1;const to=x[3]?x[3].split('').reduce((v,t)=>v*26+t.charCodeAt(0)-64,0):c;m=to-c+1;}else{r=a;c=b;n=n||1;m=m||1;}return new Range(this,r,c,n,m);}
+  getLastColumn(){return this.grid.reduce((max,row)=>Math.max(max,row.reduce((last,v,i)=>v!==''&&v!==null?i+1:last,0)),0);}
   getLastRow(){let end=0;for(let i=0;i<this.grid.length;i++)if(this.grid[i].some(v=>v!==''&&v!==null))end=i+1;return end;}
   getMaxRows(){return this.grid.length;}
   getMaxColumns(){return 30;}
@@ -30,7 +32,7 @@ class Sheet {
 function makeSS(){const obj={};for(const n of ['LOG','INFO','TEAM','TECH'])obj[n]=new Sheet(n);
   obj.LOG.set(1,1,'#');obj.LOG.set(1,2,'Time');obj.LOG.set(1,4,'Info');obj.LOG.set(2,4,'\u0414\u0410\u0422\u0410: 10.11.2026');
   for(let i=3;i<=110;i++)obj.LOG.set(i,1,i-2);
-  obj.INFO.set(3,1,'Action');obj.INFO.set(3,2,'Old');obj.INFO.set(5,1,'Lead');obj.INFO.set(5,2,'Ivan');
+  obj.INFO.set(2,1,'Колона 1');obj.INFO.set(2,2,'Инфо');obj.INFO.set(2,3,'Коментар');obj.INFO.set(3,1,'Акция');obj.INFO.set(3,2,'Old');obj.INFO.set(5,1,'Lead');obj.INFO.set(5,2,'Ivan');
   obj.TEAM.set(2,1,'Number');obj.TECH.set(2,1,'Number');
   return {getSheetByName:n=>obj[n]||null,insertSheet:n=>(obj[n]=new Sheet(n)),sheets:obj};
 }
@@ -43,12 +45,12 @@ const mediaFolders={};
 const folder = {getName:()=> 'Test folder',getFilesByName:(n)=>({hasNext:()=>copiesMade.some(x=>x.name===n)}),
   getFoldersByName:(n)=>{const folder=mediaFolders[n];return {hasNext:()=>!!folder,next:()=>folder};},
   createFolder:(n)=>{const files=[];const d={files,getFilesByName:(name)=>{const matches=files.filter(x=>x.getName()===name);return {hasNext:()=>!!matches.length,next:()=>matches[0]};},createFile:(blob)=>{const index=files.length+1;const file={getId:()=>n+index,getName:()=>blob.name,getUrl:()=>`https://drive.google.com/file/d/IMAGE${index}/view`};files.push(file);return file;}};mediaFolders[n]=d;return d;}};
-const template = {getMimeType:()=> 'application/vnd.google-apps.spreadsheet', makeCopy(name,dest){assert.equal(dest,folder);const id='COPYDOCUMENT'+String(copiesMade.length+1).padStart(20,'0');const ss=makeSS();ss.getId=()=>id;ss.getUrl=()=> 'https://docs.google.com/spreadsheets/d/'+id;copies[id]=ss;const file={id,name,getId:()=>id,getName:()=>name,getUrl:()=>ss.getUrl(),getMimeType:()=> 'application/vnd.google-apps.spreadsheet',isTrashed:()=>false,getParents:()=>{let i=0;return {hasNext:()=>i++<1,next:()=>({getId:()=>folderId})};},setTrashed(){}};copiesMade.push(file);return file;}};
+const template = {getMimeType:()=> 'application/vnd.google-apps.spreadsheet', makeCopy(name,dest){assert.equal(dest,folder);const id='COPYDOCUMENT'+String(copiesMade.length+1).padStart(20,'0');const ss=makeSS();ss.getId=()=>id;ss.getUrl=()=> 'https://docs.google.com/spreadsheets/d/'+id;copies[id]=ss;const file={id,name,getId:()=>id,getName:()=>name,setName:n=>{name=n;},getDateCreated:()=>new Date(),getUrl:()=>ss.getUrl(),getMimeType:()=> 'application/vnd.google-apps.spreadsheet',isTrashed:()=>false,getParents:()=>{let i=0;return {hasNext:()=>i++<1,next:()=>({getId:()=>folderId})};},setTrashed(){}};copiesMade.push(file);return file;}};
 const ctx={
   console, Date, JSON, String, Number, Array, Math, Error,
   DriveApp:{getFolderById:()=>folder,getFileById:id=>id===templateId?template:copiesMade.find(x=>x.id===id)},
   Utilities:{newBlob(data,mime,name){return {data,mime,name};},base64Decode:b64=>Buffer.from(b64,'base64'),formatDate(d,tz,fmt){const parts=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:tz,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(d).map(p=>[p.type,p.value]));return fmt.replace('yyyy',parts.year).replace('MM',parts.month).replace('dd',parts.day).replace('HH',parts.hour).replace('mm',parts.minute);}},
-  SpreadsheetApp:{BorderStyle:{SOLID_MEDIUM:'solid'},flush(){},openById(id){return copies[id];},
+  SpreadsheetApp:{BorderStyle:{SOLID_MEDIUM:'solid'},flush(){},openById(id){return id===templateId?makeSS():copies[id];},
    newRichTextValue(){let text='',links=[];return {setText(t){text=t;return this;},setLinkUrl(a,b,url){links.push({start:a,end:b,url});return this;},build(){return {getText:()=>text,getRuns:()=>links.map(x=>({getLinkUrl:()=>x.url,getStartIndex:()=>x.start,getEndIndex:()=>x.end,getText:()=>text.slice(x.start,x.end)}))};}};}},
   MimeType:{GOOGLE_SHEETS:'application/vnd.google-apps.spreadsheet'},
   PropertiesService:{getScriptProperties:()=>({getProperty:k=>props[k],setProperty:(k,v)=>{props[k]=v;}})},

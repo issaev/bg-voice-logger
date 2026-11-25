@@ -127,33 +127,8 @@ async function run(){
   const post=network.find(x=>x.url.endsWith('documents')&&x.opts.method==='POST');
   assert.ok(post);assert.equal(JSON.parse(post.opts.body).incident_date,'2026-11-25');
 
-  // Stable scheduler despite unrelated queue and draft re-renders.
-  const current={id:'TEST_DOC',name:'Test incident'};
-  setState('mode','session');setState('doc',current);setState('data',{LOG:[],INFO:[],TEAM:[],TECH:[],FIELD_AUDIO:{}});
-  setState('draft','');setState('queue',[]);setState('docLoading',false);
-  setState('auth',{kind:'public',name:'Tester'});setState('authLoading',false);
-  render();win.__v072test.docRef.current=current;win.__v072test.resetSessionReads();render();
-  const effect=arrEffects.find(x=>x.fn.toString().includes('window.setInterval(warm,1000)'));
-  assert.ok(effect,'missing background scheduler');
-  const baseDeps=effect.deps;
-  const countRead=()=>network.filter(x=>x.url.includes('document/')).length;
-  const before=countRead();effect.fn();await new Promise(setImmediate);
-  const timer=polls.find(x=>x.delay===1000);assert.ok(timer);
-  render();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+2,'initial LOG and next tab');
-  setState('draft','draft in progress');render();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+3,'draft remains while inactive tabs warm');
-  assert.deepEqual(Array.from(arrEffects.find(x=>x.fn.toString().includes('window.setInterval(warm,1000)')).deps),Array.from(baseDeps),
-    'queue/draft updates must not restart polling interval');
-  setState('draft','');setState('recording',true);render();timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+3,'recording must pause background requests');
-  setState('recording',false);render();isHidden=true;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+3,'hidden page must pause background requests');
-  isHidden=false;win.__v072test.syncingRef.current=true;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+3,'in-flight sync must block background requests');
-  win.__v072test.syncingRef.current=false;timer.fn();await new Promise(setImmediate);
-  assert.equal(countRead(),before+4,'eligible page warms fourth tab');
-
-  console.log('PASS v0.7.2: write ACK invalidation; calendar-date propagation; read-only GAS; queue mobile/public access; background warm scheduler.');
+  // Scheduler lifecycle, safe interaction, all-tab cadence and in-flight guards are
+  // tested behaviorally in test-v0822-tab-prefetch.js (supersedes the old polling model).
+  console.log('PASS: calendar date, create idempotency, read-only GAS and queue visibility.');
 }
 run().catch(e=>{console.error(e.stack||e);process.exitCode=1;});

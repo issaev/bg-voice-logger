@@ -109,7 +109,7 @@ async function testRead(){
 }
 async function testWrite(){
   const sync=extract('    async function syncAll() {','    useEffect(()=>{\n      // Recover interrupted uploads');
-  const schedule=extract('    function scheduleWriteRetry(items) {','    async function loadDocument(');
+  const schedule=extract('    function scheduleWriteRetry(items) {','    // Snapshot keys are tab-scoped');
   const prepared=helpers+schedule+sync+'\nthis.syncAll=syncAll;';
   const records=new Map(),server=new Set(),errors=[],readCalls=[],timers=[];
   let state=[],apiCalls=[],mode='transient';

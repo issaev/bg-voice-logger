@@ -3,7 +3,7 @@ const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../apps-script/Code.gs','utf8');
 assert.ok(!code.includes('||='),'Invalid Apps Script compound assignment');
 const source=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
-assert.ok(source.includes('if(work.state===\'synced\' && o.kind===\'log\''),'LOG should refresh before slow media queue completes');
+assert.ok(source.includes("invalidateTabs(o.doc_id"),'ACK must invalidate the document cache independently of slow media');
 assert.ok(source.includes('const cached=photoDataCacheRef.current.get(cacheKey)'),'Gallery should cache private photo previews');
 assert.ok(source.includes('const cache=audioBlobCacheRef.current'),'Audio cache missing');
 let out,hook=0;
@@ -35,5 +35,5 @@ assert.ok(nodes.some(n=>n.props['aria-label']==='Затвори аудио пл�
 assert.ok(nodes.some(n=>n.props.className==='bv-shell bv-has-audio'),'Page reserves media player space');
 const blobSize=8*1024*1024, oldRequests=Math.ceil(blobSize/196608), newRequests=Math.ceil(blobSize/524288);
 assert.strictEqual(oldRequests,43);assert.strictEqual(newRequests,16);
-assert.ok(code.includes('offset+524288'));assert.ok(code.includes("version:'0.6.1'"));
+assert.ok(code.includes('requested>524288'),'Audio reads remain capped at 512 KiB');
 console.log('PASS v0.6.1: player UI, safe cache behavior and 43 -> 16 audio segments for 8MiB.');

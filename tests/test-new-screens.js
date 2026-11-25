@@ -1,5 +1,6 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const code=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
+const slot=n=>require('./fixture-contract').slot(code,n);
 function renderScreen(overrides={}){
  let output, index=0;
  const initial=[];
@@ -27,19 +28,18 @@ function renderScreen(overrides={}){
 // Render initial auth pending + Google login + active session without external services.
 const wait=renderScreen();
 assert.ok(wait.txt.includes('Проверка на Google сесията'),wait.txt);
-// useState indices are checked here to reveal accidental hook-order changes.
-assert.equal(wait.initial[0],'choose'); // mode
-assert.equal(wait.initial[13],null); // auth
-assert.equal(wait.initial[14],true); // authLoading
-const login=renderScreen({14:false});
+// Semantic state contract: unrelated hook additions must not break these scenarios.
+assert.equal(wait.initial[slot('mode')],'choose'); // mode
+assert.equal(wait.initial[slot('auth')],null); // auth
+assert.equal(wait.initial[slot('authLoading')],true); // authLoading
+const login=renderScreen({[slot('authLoading')]:false});
 assert.ok(login.txt.includes('Влез с одобрен Google акаунт'),login.txt);
 const sample={LOG:[{row:3,cells:[1,'14:35','Иван','Екипът пристигна','Глас през приложението','Снимка 1','uuid'],photos:[{text:'Снимка 1',url:'https://drive.google.com'}]}]};
-const session=renderScreen({0:'session',1:{id:'test',name:'2026.11.10 - ДКА - Издирване - Самоков'},2:'LOG',3:sample,
-  13:{kind:'google',sub:'1234567',name:'Тест',email:'test@example.org'},14:false});
-assert.ok(session.txt.includes('Качи снимка'),session.txt);
-assert.ok(session.txt.includes('Прикачи снимка'),session.txt);
+const session=renderScreen({[slot('mode')]:'session',[slot('doc')]:{id:'test',name:'2026.11.10 - ДКА - Издирване - Самоков'},[slot('page')]:'LOG',[slot('data')]:sample,
+  [slot('auth')]:{kind:'google',sub:'1234567',name:'Тест',email:'test@example.org'},[slot('authLoading')]:false});
+assert.equal((session.txt.match(/Добави снимка/g)||[]).length,2,'Photo actions available both for new and existing LOG');
 assert.ok(session.txt.includes('Снимки ( 1 )'),session.txt);
-const info=renderScreen({0:'session',1:{id:'test',name:'Action'},2:'INFO',3:{INFO:[[],[],['Акция'],['Локация']].concat(Array(30).fill([]))},
-  13:{kind:'google',sub:'123',name:'Test',email:'test@example.org'},14:false});
+const info=renderScreen({[slot('mode')]:'session',[slot('doc')]:{id:'test',name:'Action'},[slot('page')]:'INFO',[slot('data')]:{INFO:[[],[],['Акция'],['Локация']].concat(Array(30).fill([]))},
+  [slot('auth')]:{kind:'google',sub:'123',name:'Test',email:'test@example.org'},[slot('authLoading')]:false});
 assert.ok(info.txt.includes('GPS от телефона'),info.txt);
 console.log('PASS: app renders auth gate, Google login, LOG photo controls, INFO GPS control.');

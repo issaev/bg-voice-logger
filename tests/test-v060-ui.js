@@ -2,11 +2,12 @@
 const fs=require('fs'),vm=require('vm'),assert=require('assert');
 const source=fs.readFileSync(__dirname+'/../assets/app.js','utf8');
 let output,hook=0;
+const slot=n=>require('./fixture-contract').slot(source,n);
 const values={
-  0:'session',1:{id:'DOCUMENTABCDEFGHIJKLMN012345',name:'Тестова акция'},2:'LOG',
-  3:{LOG:[{row:3,cells:[1,'14:32','Оператор','Екипът пристигна','Глас през приложението','','aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'],
+  [slot('mode')]:'session',[slot('doc')]:{id:'DOCUMENTABCDEFGHIJKLMN012345',name:'Тестова акция'},[slot('page')]:'LOG',
+  [slot('data')]:{LOG:[{row:3,cells:[1,'14:32','Оператор','Екипът пристигна','Глас през приложението','','aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa'],
     status:'',audio:{id:'bbbbbbbb-bbbb-4bbb-bbbb-bbbbbbbbbbbb',mime:'audio/webm',bytes:1000},photos:[],history:[]}]},
-  13:{kind:'google',sub:'123456789',name:'Оператор'},14:false
+  [slot('auth')]:{kind:'google',sub:'123456789',name:'Оператор'},[slot('authLoading')]:false
 };
 const h=(type,props,...children)=>({type,props:props||{},children});
 const ctx={wp:{element:{createElement:h,useState:init=>{
@@ -43,7 +44,7 @@ assert.ok(nodes.find(x=>x.props['aria-label']==='Редакция на LOG съ�
 assert.ok(content(nodes).includes('Оригиналното аудио и историята остават непроменени.'));
 assert.ok(nodes.find(x=>x.type==='button'&&content(x).includes('Чуй оригинала')));
 // A cancelled event becomes read-only and remains visible.
-values[3].LOG[0].status='cancelled';values[31]=null;
+values[slot('data')].LOG[0].status='cancelled';values[slot('logEditor')]=null;
 nodes=walk(render());
 assert.ok(nodes.some(x=>x.props.className==='bv-event bv-event-cancelled'));
 assert.ok(!nodes.some(x=>x.props['aria-label']==='Действия за събитието'));

@@ -5,7 +5,7 @@ const root='ROOTFOLDERABCDEFGHIJKLM',doc='DOCUMENTABCDEFGHIJKLMNO';
 const audioId='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 const size=700000;
 const original=Uint8Array.from({length:size},(_,i)=>i%251);
-const audioFile={isTrashed:()=>false,getBlob:()=>({getBytes:()=>Array.from(original)})};
+const audioFile={isTrashed:()=>false,getSize:()=>size,getBlob:()=>({getBytes:()=>Array.from(original)})};
 const folder={isTrashed:()=>false,getId:()=>root};
 const ctx={Buffer,Utilities:{base64Encode:x=>Buffer.from(x).toString('base64')},DriveApp:{getFileById:()=>audioFile,getFolderById:()=>folder}};
 vm.createContext(ctx);vm.runInContext(source,ctx);

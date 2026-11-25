@@ -34,7 +34,7 @@ check($last_post['timeout']===35,'photo write POST must allow 35 seconds');
 BVLOG_API::forward('operation',['kind'=>'audio_part']);
 check($last_post['timeout']===35,'audio part POST must allow 35 seconds');
 BVLOG_API::forward('operation',['kind'=>'log']);
-check($last_post['timeout']===15,'normal LOG writes keep 15 seconds');
+check($last_post['timeout']===30,'normal LOG writes use bounded 30-second timeout');
 $response_mode='redirect';
 BVLOG_API::forward('audio_read',['doc_id'=>'DOCUMENTTEST123456']);
 check($last_get['timeout']===25,'audio read redirect GET must allow 25 seconds');
