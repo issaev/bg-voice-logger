@@ -34,15 +34,16 @@ final class BVLOG_Google_Log_Write_Transport extends BVLOG_Google_Read_Transport
         return BVLOG_Direct_Sheet_Plan::decode($raw,$doc,$p);
     }
     /** The caller must have a durable dispatch reservation. Once called,
-     * ANY exception is treated as an uncertain commit. Never retry here.
+     * Only proven non-dispatch or a structured atomic rejection is definite.
+     * Never retry a dispatched batch here.
      */
     public function append_batch($doc,$requests){
         if(!self::valid_id($doc)||!is_array($requests)||count($requests)<1||count($requests)>5)
-            throw new BVLOG_Direct_Error('write_shape');
+            throw new BVLOG_Write_Rejected('write_shape',400);
         foreach($requests as $r)if(!is_array($r)||count($r)!==1||!in_array(array_key_first($r),array('appendCells','updateCells','repeatCell'),true))
-            throw new BVLOG_Direct_Error('write_shape');
+            throw new BVLOG_Write_Rejected('write_shape',400);
         $body=BVLOG_Direct_Crypto::json(array('requests'=>$requests,'includeSpreadsheetInResponse'=>false));
-        if(strlen($body)>64000)throw new BVLOG_Direct_Error('write_shape');
+        if(strlen($body)>64000)throw new BVLOG_Write_Rejected('write_shape',400);
         try{$token=$this->token();$timeout=$this->budget();}
         catch(BVLOG_Direct_Error $e){throw new BVLOG_Write_Rejected($e->getMessage(),$e->status);}
         $url='https://sheets.googleapis.com/v4/spreadsheets/'.rawurlencode($doc).':batchUpdate';

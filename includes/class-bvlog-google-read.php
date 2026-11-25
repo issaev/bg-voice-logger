@@ -5,7 +5,7 @@ require_once __DIR__.'/class-bvlog-direct-scope.php';
 /** #46: read-only Google API transport, isolated alpha. No browser tokens,
  * no Google mutation methods, no domain-wide delegation, no raw error logging.
  */
-final class BVLOG_Direct_Error extends RuntimeException {
+class BVLOG_Direct_Error extends RuntimeException {
     public $status,$scope_reason;
     public function __construct($category,$status=503,$scope_reason=''){parent::__construct($category);$this->status=$status;$this->scope_reason=$scope_reason;}
 }

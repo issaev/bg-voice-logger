@@ -1,3 +1,7 @@
+# v0.9.0-beta.1 — staging Direct Sheets + SMS candidate
+
+See [installation and limits](docs/UPGRADE_V090_BETA1_BG.md). Direct Sheets operations and SMS pilot; no production deployment, no full direct Drive migration. All live acceptance gates remain open.
+
 ## v0.8.3 — SMS fallback pilot + STT replay fix candidate (not deployed)
 
 Based on v0.8.2.2 candidate (PR #45) and the v0.8.2.1 production working baseline. WordPress 0.8.3; JS `0.8.3-5e7cf749a0ac`; GAS 0.8.3. Optional separately deployable STT Worker 0.6.2 (sar-bg-v1 prompt unchanged); existing STT deployment does not change when installing WordPress/GAS.

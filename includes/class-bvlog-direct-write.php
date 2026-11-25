@@ -98,7 +98,7 @@ final class BVLOG_Direct_Write {
         if(!current_user_can('manage_options'))wp_die('Forbidden','',array('response'=>403));
         check_admin_referer('bvlog_verify_write_fence');
         $slots=self::slots();$slot=isset($_POST['slot'])?absint($_POST['slot']):999;
-        $status='fail';
+        $status='fail';$reason='internal';
         try{
             if(!isset($slots[$slot]))throw new BVLOG_Direct_Error('write_configuration');
             $doc=$slots[$slot];$cfg=self::config($doc);
@@ -112,18 +112,26 @@ final class BVLOG_Direct_Write {
             if(($data['ok']??false)!==true||($data['policy']??'')!=='direct_log_only_v1'||
                ($data['fence_rollout']??'')!==$cfg['rollout'])
                 throw new BVLOG_Direct_Error('write_fence_unverified');
+            // Confirm Editor access and prepared LOG/OPS schema without mutation.
+            $google=new BVLOG_Google_Log_Write_Transport($cfg,20);
+            $before=$google->metadata($doc);$google->log_snapshot($doc);
+            if($google->metadata($doc)['version']!==$before['version'])throw new BVLOG_Direct_Error('changed_during_read');
             $verified=time();update_option($cfg['proof_key'],$verified,false);
             if((int)get_option($cfg['proof_key'],0)!==$verified)throw new BVLOG_Direct_Error('write_storage');
-            $status='ok';
-        }catch(Throwable $e){/* No document ID, raw Google response or key in admin notice. */}
-        wp_safe_redirect(add_query_arg(array('page'=>'bvlog','write_fence'=>$status),admin_url('options-general.php')));exit;
+            $status='ok';$reason='verified';
+        }catch(Throwable $e){
+            if($e instanceof BVLOG_Direct_Error||$e instanceof BVLOG_Log_Plan_Error){
+                $code=$e->getMessage();if(preg_match('/^[a-z0-9_]{1,64}$/D',$code))$reason=$code;
+            }
+        }
+        wp_safe_redirect(add_query_arg(array('page'=>'bvlog','write_fence'=>$status,'write_reason'=>$reason),admin_url('options-general.php')));exit;
     }
     public static function admin_panel(){
         if(!current_user_can('manage_options'))return;
         echo '<h2>Direct LOG writer pilot (#50)</h2>';
         if(!self::fences()){echo '<p>OFF. No direct-write test incidents configured.</p>';return;}
         echo '<p>Prepared synthetic incidents only. LOG append; sheet_pilot additionally permits supported field, row and LOG changes. Do not edit or sort a test document manually while the writer is active. CREATE/media remain outside this direct pilot. Fence verification is required every 24 hours.</p>';
-        if(isset($_GET['write_fence']))echo '<p>'.(($_GET['write_fence']==='ok')?'Fence verified.':'Fence verification failed.').'</p>';
+        if(isset($_GET['write_fence']))echo '<p>'.(($_GET['write_fence']==='ok')?'Fence and write preflight verified.':'Fence or write preflight failed: '.esc_html(sanitize_key($_GET['write_reason']??'unknown'))).'</p>';
         foreach(self::slots() as $i=>$doc){
             $state='not ready';$pending='unknown';
             try{self::ready($doc);$state='ready';}catch(Throwable $ignore){}

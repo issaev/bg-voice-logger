@@ -6,6 +6,7 @@ class BVLOG_Direct_Error extends RuntimeException {
     public $status;
     public function __construct($c,$s=503){parent::__construct($c);$this->status=$s;}
 }
+class BVLOG_Write_Rejected extends BVLOG_Direct_Error {}
 function test($ok,$m){if(!$ok)throw new RuntimeException($m);}
 function fails($fn,$code){try{$fn();}catch(RuntimeException $e){test($e->getMessage()===$code,'Expected '.$code.', got '.$e->getMessage());return;}throw new RuntimeException('Missing '.$code);}
 final class FakeLedger {
@@ -48,6 +49,7 @@ final class FakeGoogle {
     public function log_snapshot($doc){return $this->snapshot;}
     public function append_batch($doc,$requests){
         $this->posts++;
+        if($this->mode==='rejected')throw new BVLOG_Write_Rejected('write_rejected_403',403);
         if($this->mode==='lost_before')throw new BVLOG_Direct_Error('write_unknown');
         foreach($requests as $request){
             $a=$request['appendCells'];$tab=$a['sheetId']===0?'LOG':'__BVLOG_OPS';$width=$tab==='LOG'?8:5;
@@ -99,4 +101,8 @@ test($b['deduplicated']&&$g->posts===1&&$l->activeId===null,'recover durable rec
 $g=new FakeGoogle();$l=new FakeLedger();$c=new FakeCache();$g->mode='denied';
 fails(function()use($run,$g,$l,$c,$p){$run($g,$l,$c,$p);},'scope_denied');
 test(!$g->posts&&!$l->held&&!$c->events,'access denied before any mutation, lock released');
-echo "PASS direct LOG engine: duplicate, SMS race surrogate, lost ACK, pending barrier, version, SQL failure, scope\n";
+$g=new FakeGoogle();$l=new FakeLedger();$c=new FakeCache();$g->mode='rejected';
+fails(function()use($run,$g,$l,$c,$p){$run($g,$l,$c,$p);},'write_rejected_403');
+test($l->activeId===null&&!$l->held&&$c->events===array('begin','known'),'explicit atomic rejection releases reservation');
+$g->mode='success';test($run($g,$l,$c,$p)['ok']&&$g->posts===2,'retry after proven rejection');
+echo "PASS direct LOG engine: duplicate, SMS race surrogate, lost ACK, pending barrier, version, SQL failure, scope and definite rejection\n";
