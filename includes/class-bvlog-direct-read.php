@@ -227,6 +227,9 @@ final class BVLOG_Direct_Read {
             }
         }catch(Throwable $e){
             $err=self::error($e);$out['error']=$err->get_error_code();$out['http_status']=$err->get_error_data()['status'];
+            // This route is admin-only; never add identifiers, names or metadata values.
+            if($e instanceof BVLOG_Direct_Error&&$e->getMessage()==='scope_denied'&&$e->scope_reason!=='')
+                $out['scope_reason']=$e->scope_reason;
         }
         $out['elapsed_ms']=(int)round((microtime(true)-$started)*1000);
         if($google)$out['google']=$google->metrics;
@@ -245,12 +248,12 @@ final class BVLOG_Direct_Read {
         }
         if(!BVLOG_Read_Cache::installed()){echo '<p>Cache table not ready.</p>';return;}
         if(get_option('bvlog_direct_last_guard_error',''))echo '<p>Cache write guard reported an error. Review the pilot before use.</p>';
-        echo '<div id="bvlog-perf-probe"><p>Run Check first. Compare verifies projections. Direct bypasses cache; Cache uses the real shared cache. Use the same fixture for all modes.</p>';
+        echo '<div id="bvlog-perf-probe"><p>Run Check first for individual probes. All-tab parity runs Check and compares LOG, INFO, TECH and TEAM. Paired benchmark checks the selected tab before measuring GAS, Direct and Cache. Use stable synthetic fixtures; neither suite enables Direct mode.</p>';
         echo '<label>Test document <select id="bvlog-perf-doc">';
         foreach(self::docs() as $i=>$doc)echo '<option value="'.esc_attr($doc).'">Test slot '.($i+1).'</option>';
         echo '</select></label> <label>Tab <select id="bvlog-perf-tab">';
         foreach(BVLOG_Read_Projection::TABS as $tab)echo '<option>'.esc_html($tab).'</option>';
-        echo '</select></label> <label>Mode <select id="bvlog-perf-mode"><option>check</option><option>compare</option><option>gas</option><option>direct</option><option>cache</option></select></label> ';
+        echo '</select></label> <label>Mode <select id="bvlog-perf-mode"><option>check</option><option>compare</option><option>gas</option><option>direct</option><option>cache</option><option value="parity_all">All-tab parity</option><option value="benchmark_pair">Paired benchmark</option></select></label> ';
         echo '<label>Samples <select id="bvlog-perf-n"><option>1</option><option>10</option><option>40</option></select></label> ';
         echo '<label>Concurrent requests <select id="bvlog-perf-c"><option>1</option><option>5</option><option>10</option></select></label> ';
         echo '<button type="button" class="button" id="bvlog-perf-run">Run probe</button> <button type="button" class="button" id="bvlog-perf-export" disabled>Export JSON</button>';
@@ -259,34 +262,73 @@ final class BVLOG_Direct_Read {
         echo '<script>(function(cfg){"use strict";
 const by=id=>document.getElementById("bvlog-perf-"+id),run=by("run"),out=by("output"),status=by("status"),exp=by("export");
 let results=[],checked="";
-const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const tabs=["LOG","INFO","TECH","TEAM"],sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+const blocked=r=>!r.ok&&[401,403,429].includes(r.http_status);
 function report(){
 out.value=JSON.stringify(results,null,2);exp.disabled=!results.length;
 const groups={};for(const r of results){const k=[r.slot,r.tab,r.mode,r.concurrency,r.backend||"error"].join(" / ");(groups[k]||(groups[k]=[])).push(r);}
 const summary=[];for(const [k,rs] of Object.entries(groups)){
 const good=rs.filter(x=>x.ok&&Number.isFinite(x.client_ms)),v=good.map(x=>x.client_ms).sort((a,b)=>a-b);
 const median=v.length?(v[Math.floor((v.length-1)/2)]+v[Math.ceil((v.length-1)/2)])/2:null;
-summary.push({group:k,n:rs.length,errors:rs.length-good.length,p50_client_ms:median,max_client_ms:v.length?v[v.length-1]:null,
+const row={group:k,n:rs.length,errors:rs.length-good.length,p50_client_ms:median,max_client_ms:v.length?v[v.length-1]:null,
 p95_client_ms:v.length>=40?v[Math.ceil(v.length*0.95)-1]:null,
 mean_sheets_calls:good.length?good.reduce((s,x)=>s+(x.google?.sheets_calls||0),0)/good.length:null,
-mean_drive_calls:good.length?good.reduce((s,x)=>s+(x.google?.drive_calls||0),0)/good.length:null});}
+mean_drive_calls:good.length?good.reduce((s,x)=>s+(x.google?.drive_calls||0),0)/good.length:null};
+if(rs[0].mode==="compare"){row.parity_pass=rs.filter(x=>x.ok&&x.parity===true).length;row.parity_fail=rs.filter(x=>x.ok&&x.parity===false).length;row.parity_unavailable=rs.length-row.parity_pass-row.parity_fail;}
+summary.push(row);}
 by("summary").textContent=JSON.stringify(summary,null,2);
 }
 exp.onclick=()=>{const blob=new Blob([JSON.stringify(results,null,2)],{type:"application/json"});const url=URL.createObjectURL(blob);
 const a=document.createElement("a");a.href=url;a.download="bvlog-direct-benchmark.json";a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
 async function probe(doc,tab,mode,slot,concurrency){const t=performance.now();
+const context=()=>({mode,tab,slot,concurrency,client_ms:Math.round(performance.now()-t)});
 try{const response=await fetch(cfg.url,{method:"POST",credentials:"same-origin",cache:"no-store",
 headers:{"Content-Type":"application/json","X-WP-Nonce":cfg.nonce},body:JSON.stringify({doc,tab,mode})});
 const value=await response.json();
-if(!response.ok) return {ok:false,mode,tab,slot,concurrency,http_status:response.status,client_ms:Math.round(performance.now()-t)};
-return {...value,slot,concurrency,client_ms:Math.round(performance.now()-t)};
-}catch(e){return {ok:false,mode,tab,slot,concurrency,error:"client_transport",client_ms:Math.round(performance.now()-t)};}}
-run.onclick=async()=>{const doc=by("doc").value,tab=by("tab").value,mode=by("mode").value,slot=by("doc").selectedIndex+1;
-if(mode!=="check"&&checked!==doc){status.textContent="Run Check for this test document first.";return;}
-const n=(mode==="check"||mode==="compare")?1:Number(by("n").value),c=(mode==="check"||mode==="compare")?1:Math.min(n,Number(by("c").value));
-run.disabled=true;try{for(let i=0;i<n;i+=c){const group=await Promise.all(Array.from({length:Math.min(c,n-i)},()=>probe(doc,tab,mode,slot,c)));
-results.push(...group);if(mode==="check")checked=group[0].ok?doc:"";report();status.textContent="Completed "+Math.min(n,i+c)+"/"+n+". Results include failures.";
-if(i+c<n)await sleep(1500);}}finally{run.disabled=false;}};
+if(!response.ok)return {ok:false,...context(),http_status:response.status,error:"http_error"};
+if(!value||typeof value.ok!=="boolean"||value.mode!==mode||value.tab!==tab||(mode==="compare"&&value.ok&&typeof value.parity!=="boolean"))
+return {ok:false,...context(),error:"invalid_probe_response"};
+return {...value,...context()};
+}catch(e){return {ok:false,...context(),error:"client_transport"};}}
+async function one(doc,tab,mode,slot){const r=await probe(doc,tab,mode,slot,1);results.push(r);report();return r;}
+run.onclick=async()=>{
+if(run.disabled)return;
+const doc=by("doc").value,tab=by("tab").value,mode=by("mode").value,slot=by("doc").selectedIndex+1;
+const suite=mode==="parity_all"||mode==="benchmark_pair";
+if(!suite&&mode!=="check"&&checked!==doc){status.textContent="Run Check for this test document first.";return;}
+const selectedN=Number(by("n").value),selectedC=Number(by("c").value);
+if(![1,10,40].includes(selectedN)||![1,5,10].includes(selectedC)){status.textContent="Invalid sample count.";return;}
+const n=selectedN,c=Math.min(n,selectedC);
+run.disabled=true;try{
+if(mode==="check"||suite){
+checked="";status.textContent="Checking test document...";
+const check=await one(doc,tab,"check",slot);
+if(!check.ok){status.textContent="Check failed; no further requests. Review the diagnostic code.";return;}
+checked=doc;if(mode==="check"){status.textContent="Check passed.";return;}
+}
+if(mode==="compare"||suite){
+const plan=mode==="parity_all"?tabs:[tab];let passed=0,failed=0,unavailable=0,done=0;
+for(const target of plan){
+status.textContent="Comparing "+target+" ("+(done+1)+"/"+plan.length+")";
+const r=await one(doc,target,"compare",slot);done++;
+if(!r.ok)unavailable++;else if(r.parity)passed++;else failed++;
+if(blocked(r))break;
+if(done<plan.length)await sleep(1500);
+}
+status.textContent="Parity: "+passed+" passed, "+failed+" mismatched, "+unavailable+" unavailable, "+(plan.length-done)+" not run.";
+if(mode!=="benchmark_pair"||passed!==plan.length)return;
+}
+const modes=mode==="benchmark_pair"?["gas","direct","cache"]:[mode];
+const total=n*modes.length;let done=0,errors=0;
+for(let i=0;i<n;i+=c){
+for(const variant of modes){
+const group=await Promise.all(Array.from({length:Math.min(c,n-i)},()=>probe(doc,tab,variant,slot,c)));
+results.push(...group);done+=group.length;errors+=group.filter(x=>!x.ok).length;report();
+status.textContent="Completed "+done+"/"+total+"; "+errors+" errors.";
+if(group.some(blocked)){status.textContent+=" Stopped after an access or quota denial.";return;}
+if(done<total)await sleep(1500);
+}}
+}finally{run.disabled=false;}};
 })('.wp_json_encode($config,JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT).');</script>';
     }
 }

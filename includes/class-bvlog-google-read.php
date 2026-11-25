@@ -1,12 +1,13 @@
 <?php
 if (!defined('ABSPATH')) { exit; }
+require_once __DIR__.'/class-bvlog-direct-scope.php';
 
 /** #46: read-only Google API transport, isolated alpha. No browser tokens,
  * no Google mutation methods, no domain-wide delegation, no raw error logging.
  */
 final class BVLOG_Direct_Error extends RuntimeException {
-    public $status;
-    public function __construct($category,$status=503){parent::__construct($category);$this->status=$status;}
+    public $status,$scope_reason;
+    public function __construct($category,$status=503,$scope_reason=''){parent::__construct($category);$this->status=$status;$this->scope_reason=$scope_reason;}
 }
 final class BVLOG_Direct_Crypto {
     public static function b64($s){return rtrim(strtr(base64_encode($s),'+/','-_'),'=');}
@@ -36,7 +37,7 @@ final class BVLOG_Google_Read_Transport {
     private $cfg,$deadline,$token='';
     public $metrics=array('drive_calls'=>0,'sheets_calls'=>0,'token_calls'=>0,'drive_ms'=>0,'sheets_ms'=>0,'token_ms'=>0,'response_bytes'=>0);
     public function __construct($cfg,$budget=18){$this->cfg=$cfg;$this->deadline=microtime(true)+$budget;}
-    public static function valid_id($s){return is_string($s)&&preg_match('/^[A-Za-z0-9_-]{15,200}$/D',$s);}
+    public static function valid_id($s){return BVLOG_Direct_Scope::valid_id($s);}
     public static function credentials($filename){
         if(!is_string($filename)||$filename==='')throw new BVLOG_Direct_Error('credential_file');
         $path=realpath($filename);
@@ -58,12 +59,8 @@ final class BVLOG_Google_Read_Transport {
             'fingerprint'=>hash('sha256',$raw),'kid'=>(string)($c['private_key_id']??''));
     }
     public static function check_metadata($file,$doc,$folder,$template){
-        if(!self::valid_id($doc)||$doc===$template||($file['id']??'')!==$doc||
-            ($file['mimeType']??'')!=='application/vnd.google-apps.spreadsheet'||
-            ($file['trashed']??null)!==false||!is_array($file['parents']??null)||
-            !in_array($folder,$file['parents'],true)||!is_string($file['name']??null)||
-            preg_match('/^BVLOG_CREATE_PENDING_[a-f0-9-]{32,50}$/i',$file['name']))
-            throw new BVLOG_Direct_Error('scope_denied',403);
+        $reason=BVLOG_Direct_Scope::metadata_reason($file,$doc,$folder,$template);
+        if($reason!=='')throw new BVLOG_Direct_Error('scope_denied',403,$reason);
         $v=$file['version']??'';
         if(!is_string($v)&&!is_int($v))throw new BVLOG_Direct_Error('drive_version');
         if(!preg_match('/^[0-9]{1,30}$/D',(string)$v))throw new BVLOG_Direct_Error('drive_version');
@@ -140,7 +137,8 @@ final class BVLOG_Google_Read_Transport {
             'Authorization'=>'Bearer '.$this->token())));
     }
     public function metadata($doc){
-        if(!self::valid_id($doc)||$doc===$this->cfg['template'])throw new BVLOG_Direct_Error('scope_denied',403);
+        $reason=BVLOG_Direct_Scope::document_reason($doc,$this->cfg['template']);
+        if($reason!=='')throw new BVLOG_Direct_Error('scope_denied',403,$reason);
         return self::check_metadata($this->get('drive','https://www.googleapis.com/drive/v3/files/'.rawurlencode($doc),
             array('fields'=>'id,name,mimeType,trashed,parents,version','supportsAllDrives'=>'true')),
             $doc,$this->cfg['folder'],$this->cfg['template']);

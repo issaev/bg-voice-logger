@@ -104,6 +104,10 @@ foreach(array(array('parents'=>array('OTHER')),array('trashed'=>true),array('mim
     reject(function()use($x,$doc,$folder,$template){BVLOG_Google_Read_Transport::check_metadata($x,$doc,$folder,$template);},'BVLOG_Direct_Error','invalid Drive scope');
 }
 reject(function()use($file,$doc,$folder){BVLOG_Google_Read_Transport::check_metadata($file,$doc,$folder,$doc);},'BVLOG_Direct_Error','template excluded');
+try{
+    BVLOG_Google_Read_Transport::check_metadata(array_replace($file,array('parents'=>array('OTHER'))),$doc,$folder,$template);
+    test(false,'wrong parent denied');
+}catch(BVLOG_Direct_Error $e){test($e->status===403&&$e->getMessage()==='scope_denied'&&$e->scope_reason==='parent_mismatch','stable external error and specific admin reason');}
 $sealed=BVLOG_Direct_Crypto::seal(array('value'=>'private'),'scope1');
 test(BVLOG_Direct_Crypto::open($sealed,'scope1')===array('value'=>'private'),'sealed cache roundtrip');
 test(BVLOG_Direct_Crypto::open($sealed,'scope2')===null,'cross-scope cache rejected');
