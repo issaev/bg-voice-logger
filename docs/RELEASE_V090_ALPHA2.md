@@ -1,3 +1,0 @@
-# v0.9.0-alpha.2 staging candidate
-
-WordPress 0.9.0-alpha.2; JS `0.9.0-alpha.2-0b29dbb53a6c`. GAS and STT Worker unchanged. The new admin-only scope diagnostics and automated parity/paired benchmarks are included. The eight mocked probe scenarios passed and application/service-worker JavaScript parsed. ZIP sources were checked against the pinned Git blobs; all entries checked with CRC32 and exact Git blob digest on local readback. No production approval, deployment or main merge. PHP lint/runtime, full regression and live staging verification remain pending. See `UPGRADE_V090_ALPHA_BG.md` for configuration and testing steps.

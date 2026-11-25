@@ -1,6 +1,0 @@
-Google Material Icons - install_mobile (Rounded)
-Copyright Google LLC (Material Design Icons project)
-Source: https://github.com/google/material-design-icons/blob/master/src/action/install_mobile/materialiconsround/24px.svg
-Upstream SVG blob SHA: 815077ee771b12ddf590b2d6c10b0a615ea95fba
-Licensed under the Apache License, Version 2.0. See LICENSE-MATERIAL-ICONS.txt.
-Adaptation: original path geometry retained; rendered as inline React SVG with SKB colors and sizing. No external font or CDN required.
