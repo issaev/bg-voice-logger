@@ -127,6 +127,7 @@ async function runV082(app,gas,sw,css,php){
   const deps={CFG:{api:'/wp-json/bvlog/v1/'},viewRef,pageRef,docRef,documentRequestRef,documentReadInFlightRef,readBackoffRef,navigator,
     tabCacheRef:{current:new Map()},prefetchOrder:['LOG','INFO','TECH','TEAM'],tabRefreshMs:120000,
     readRetryRef:{current:{}},refreshRef:{current:{safeToPaint:true}},setReadActivity:()=>{},
+    smsRequestRef:{current:0},setSmsDialog:()=>{},setSmsPreparing:()=>{},
     setData:d=>views.push(d),setCachedView:v=>statuses.push(['cached',v]),setLastFreshAt:v=>statuses.push(['fresh',v]),
     setDocLoadError:v=>statuses.push(['error',v]),setDocLoading:v=>statuses.push(['loading',v]),setNotice:()=>{},
     clearReadRetry:()=>{},scheduleReadRetry:()=>false,

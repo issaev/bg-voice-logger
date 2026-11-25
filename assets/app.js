@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.2.2-3e65539c2fb5';
+  const BVLOG_RUNNING_BUILD = '0.8.3-5e7cf749a0ac';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -2312,6 +2312,7 @@
         const snapshot=info?info.data:(await database('get','snapshots',tabSnapshotKey(id,'INFO')))?.data;
         if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
         const grant=snapshot?.SMS_PILOT;
+        if(navigator.onLine&&info?.dirty)throw Error('Опресни INFO: телефонът на координатора може да е променен.');
         const plan=await makeSmsPlan(entry,grant);
         if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
         setSmsDialog(Object.assign({},plan,{index:0,copyStatus:'',opened:[]}));
@@ -2742,7 +2743,7 @@
       smsDialog&&h('div',{className:'bv-modal-backdrop',onClick:()=>setSmsDialog(null)},
         h('div',{className:'bv-modal bv-sms-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Изпращане по SMS'},
           h('h3',null,'Изпрати събитие по SMS'),
-          h('p',null,'Координатор: '+smsDialog.phone),
+          h('p',null,'Координатор: '+smsDialog.phone+' · '+smsDialog.parts.length+' отделни SMS'),
           h('p',{className:'bv-muted'},'Некриптиран текст. Не изпращай чувствителни лични или медицински данни. Провери номера.'),
           h('strong',null,'Част '+(smsDialog.index+1)+' / '+smsDialog.parts.length+' · '+smsUnits(smsDialog.parts[smsDialog.index]).encoding),
           smsDialog.parts.length>1&&h('p',{className:'bv-muted'},'Изпрати всяка част отделно. Получените части могат да се прочетат, но записът в Sheets чака всички.'),

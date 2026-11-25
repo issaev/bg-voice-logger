@@ -239,6 +239,9 @@ class BVLOG_SMS {
         try {
             $g=self::grant($p['alias']);
             if(!$g||$g['device']!==$msg['deviceId'])return self::err('grant',403);
+            $recipient=$msg['payload']['recipient']??null;
+            if(is_string($recipient)&&$recipient!==''&&self::phone($recipient)!==$g['phone'])
+                return self::err('recipient',403);
             $scope=self::key('event',$p['alias'].'|'.$p['id']);$grant=self::key('grant',$p['alias']);
             $rid=self::key('receipt',$scope);
             $receipt=array('alias'=>$p['alias'],'id'=>$p['id']);

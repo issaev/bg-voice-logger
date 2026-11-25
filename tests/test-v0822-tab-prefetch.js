@@ -14,6 +14,7 @@ async function runV0822(app,css){
   let shown=null;
   const deps={scopeName:()=>scope,Date:Clock,CFG:{api:'/wp-json/bvlog/v1/'},docRef,pageRef,viewRef,documentRequestRef,documentReadInFlightRef,tabCacheRef,refreshRef,readRetryRef,readBackoffRef,
     prefetchOrder:['LOG','INFO','TECH','TEAM'],tabRefreshMs:120000,navigator:{get onLine(){return online;}},
+    smsRequestRef:{current:0},setSmsDialog:()=>{},setSmsPreparing:()=>{},
     clearReadRetry:()=>{readRetryRef.current={};},scheduleReadRetry:()=>false,
     setData:v=>{shown=v;views.push(v);},setCachedView:v=>states.push(['cache',v]),setLastFreshAt:v=>states.push(['fresh',v]),
     setDocLoadError:v=>states.push(['error',v]),setDocLoading:v=>states.push(['loading',v]),setReadActivity:v=>states.push(['activity',v]),

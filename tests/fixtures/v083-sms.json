@@ -1,0 +1,17 @@
+{
+  "entry": {
+    "doc_id": "SYNTHETIC_DOCUMENT_0001",
+    "op_id": "550e8400-e29b-41d4-a716-446655440000",
+    "event_at": "2026-11-24T12:35:00.999Z",
+    "source": "text",
+    "text": "Екип 2 достигна контролна точка 4. Продължаваме на север.\nСледващ ред: | кавички \" и emoji 👨‍👩‍👧‍👦."
+  },
+  "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+  "alias": "AbCd0123",
+  "parts": [
+    "DK1AbCd0123VQ6EAOKbQdSnFkRmVUQAAA0104tp0aycTQjxrFjjFBnoH9WSj\nЕкип 2 до",
+    "DK1AbCd0123VQ6EAOKbQdSnFkRmVUQAAA0204\nстигна контролна точка 4. Продъл",
+    "DK1AbCd0123VQ6EAOKbQdSnFkRmVUQAAA0304\nжаваме на север.\nСледващ ред: | ",
+    "DK1AbCd0123VQ6EAOKbQdSnFkRmVUQAAA0404\nкавички \" и emoji 👨‍👩‍👧‍👦."
+  ]
+}
