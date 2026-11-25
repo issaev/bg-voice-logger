@@ -99,7 +99,7 @@ function bvlDispatch_(request) {
     const folder = DriveApp.getFolderById(folderId);
     const template = DriveApp.getFileById(templateId);
     if (template.getMimeType() !== BVL.MIME) throw new Error('Template is not a Google spreadsheet.');
-    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.2'};
+    return {ok:true, folder:folder.getName(), template:template.getName(), version:'0.8.3'};
   }
   if (action === 'list') return bvlList_(folderId, templateId, request.request_id);
   if (action === 'read') return bvlRead_(folderId, templateId, payload.doc_id, request.request_id, payload.tab);
@@ -525,7 +525,26 @@ function bvlFindId_(sheet, idCol, fromRow, opId) {
   return found ? found.getRow() : 0;
 }
 function bvlStamp_(meta, p, result) {
-  meta.appendRow([p.op_id, p.kind, new Date().toISOString(), p.author || '', JSON.stringify(result).slice(0,1000)]);
+  const receipt=Object.assign({},result);
+  if(p.kind==='log'&&/^[a-f0-9]{64}$/.test(String(p.payload_hash||'')))
+    receipt.payload_hash=p.payload_hash;
+  if(p.kind==='log'&&p.transport==='sms')receipt.transport='sms';
+  meta.appendRow([p.op_id, p.kind, new Date().toISOString(), p.author || '', JSON.stringify(receipt).slice(0,1000)]);
+}
+function bvlOriginalLogHash_(meta,opId) {
+  const row=bvlFindId_(meta,1,2,opId);
+  if(!row)return '';
+  try{
+    const receipt=JSON.parse(meta.getRange(row,5).getDisplayValue());
+    return /^[a-f0-9]{64}$/.test(String(receipt.payload_hash||''))?receipt.payload_hash:'';
+  }catch(ignore){return '';}
+}
+function bvlSmsConflict_(meta,payload,opId){
+  if(payload.kind!=='log')return false;
+  const incoming=String(payload.payload_hash||'');
+  if(!incoming&&payload.transport!=='sms')return false;
+  const stored=bvlOriginalLogHash_(meta,opId);
+  return (stored&&stored!==incoming)||(!stored&&payload.transport==='sms');
 }
 // Find the last nonempty operational row without fetching the entire history.
 // The reference implementation scanned all rows from firstRow to getLastRow().
@@ -561,6 +580,8 @@ function bvlOperation_(folderId, templateId, payload, requestId) {
   const meta = bvlPrepare_(ss,needed);
   phase('operation_prepared');
   if (bvlDone_(meta, opId)) {
+    if(bvlSmsConflict_(meta,payload,opId))
+      return {ok:false,code:'sms_conflict',message:'Original LOG payload cannot be verified; review without overwriting.'};
     phase('operation_deduplicated');
     return {ok:true,deduplicated:true,complete:payload.kind==='audio_part'};
   }
@@ -570,8 +591,13 @@ function bvlOperation_(folderId, templateId, payload, requestId) {
   if (payload.kind === 'add_row' && payload.sheet === 'TEAM') existingRow = bvlFindId_(ss.getSheetByName('TEAM'), 9, 3, opId);
   if (payload.kind === 'add_row' && payload.sheet === 'TECH') existingRow = bvlFindId_(ss.getSheetByName('TECH'), 6, 3, opId);
   if (existingRow) {
+    // Existing legacy/unacknowledged row without an immutable receipt: do not
+    // claim a different SMS payload was confirmed or stamp an invented hash.
+    if(payload.kind==='log'&&payload.transport==='sms')
+      return {ok:false,code:'sms_conflict',message:'Existing LOG row has no verified original payload; review.'};
     const dedup = {ok:true,deduplicated:true,row:existingRow};
-    bvlStamp_(meta,payload,dedup);
+    const legacy=Object.assign({},payload);delete legacy.payload_hash;
+    bvlStamp_(meta,legacy,dedup);
     phase('operation_existing_row');
     return dedup;
   }
@@ -621,7 +647,7 @@ function bvlLog_(ss, p) {
   bvlEnsureRows_(sheet,nextRow);
   const isLate = !!lastDate && date !== lastDate && bvlISODate_(eventAt) < bvlISODate_(new Date());
   sheet.getRange(nextRow,1,1,8).setValues([[
-    serial+1, bvlTime_(eventAt), bvlCell_(p.author||''), bvlCell_(text), p.source === 'text' ? BVL.TEXT : BVL.VOICE, '', String(p.op_id), ''
+    serial+1, bvlTime_(eventAt), bvlCell_(p.author||''), bvlCell_(text), p.transport === 'sms' ? 'SMS \u043f\u0440\u0435\u0437 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435\u0442\u043e' : (p.source === 'text' ? BVL.TEXT : BVL.VOICE), '', String(p.op_id), ''
   ]]);
   return {ok:true, row:nextRow, date:date, late:isLate};
 }
@@ -818,6 +844,7 @@ function bvlRead_(folderId, templateId, docId, requestId, requestedTab) {
   phase('team_tech_loaded');
   const result={ok:true,id:docId,name:metadata.name,url:ss.getUrl(),data:data};
   if(tab)result.loaded_tabs=[tab];
+  if(tab==='INFO')result.backend_version='0.8.3';
   phase('read_complete');
   return result;
 }

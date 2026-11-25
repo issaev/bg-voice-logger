@@ -56,6 +56,7 @@ require_once BVLOG_DIR . 'includes/class-bvlog-auth.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-api.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-stt.php';
 require_once BVLOG_DIR . 'includes/class-bvlog-admin.php';
+require_once BVLOG_DIR . 'includes/class-bvlog-sms.php';
 
 function bvlog_defaults() {
     return array(
@@ -169,6 +170,7 @@ add_shortcode('bg_voice_logger', function () {
         'logo_url' => BVLOG_URL . 'assets/logo-optimized.webp',
         'public_access' => !empty(bvlog_settings()['public_access']),
         'stt_cloud' => BVLOG_STT::configured(),
+        'sms_pilot' => BVLOG_SMS::enabled(),
         'stt_mode' => bvlog_settings()['stt_mode'] ?? 'cloud',
         'plugin_version' => BVLOG_VERSION,
         'expected_build' => bvlog_expected_js_build(),
@@ -180,6 +182,9 @@ add_shortcode('bg_voice_logger', function () {
 add_action('rest_api_init', array('BVLOG_API', 'register_routes'));
 add_filter('rest_pre_serve_request', array('BVLOG_API', 'serve_audio_stream'), 10, 4);
 add_action('rest_api_init', array('BVLOG_STT', 'register_routes'));
+add_action('rest_api_init', array('BVLOG_SMS', 'register_routes'));
+add_action('admin_init', array('BVLOG_SMS', 'install'));
+add_action('admin_post_bvlog_sms_retry', array('BVLOG_SMS', 'admin_retry'));
 add_action('admin_menu', array('BVLOG_Admin', 'register_menu'));
 add_action('admin_post_bvlog_save', array('BVLOG_Admin', 'save'));
 add_action('admin_post_bvlog_test', array('BVLOG_Admin', 'test'));
