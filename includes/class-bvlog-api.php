@@ -321,9 +321,15 @@ class BVLOG_API {
     }
     private static function operation_author($payload) {
         $identity=BVLOG_Auth::identity();
-        if ($identity && ($identity['kind'] ?? '')!=='public') return substr(sanitize_text_field($identity['name'] ?? ''),0,80);
+        if ($identity && ($identity['kind'] ?? '')!=='public') return self::author_name($identity['name'] ?? '');
         $name=trim(sanitize_text_field($payload['author']??''));
-        return $name!==''?substr($name,0,80):'Guest operator';
+        return $name!==''?self::author_name($name):'Guest operator';
+    }
+    public static function author_name($name){
+        $name=sanitize_text_field((string)$name);
+        if(function_exists('mb_substr'))return mb_substr($name,0,80,'UTF-8');
+        if(preg_match('/^.{0,80}/us',$name,$m))return $m[0];
+        return '';
     }
     public static function audio_view($request) {
         $doc = sanitize_text_field((string)$request->get_param('doc_id'));

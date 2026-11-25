@@ -34,7 +34,8 @@ final class BVLOG_Direct_Crypto {
 class BVLOG_Google_Read_Transport {
     const SCOPES='https://www.googleapis.com/auth/spreadsheets.readonly https://www.googleapis.com/auth/drive.metadata.readonly';
     const MAX_BYTES=2097152;
-    private $cfg,$deadline,$token='';
+    protected $cfg;
+    private $deadline,$token='';
     protected function scopes(){return self::SCOPES;}
     public $metrics=array('drive_calls'=>0,'sheets_calls'=>0,'token_calls'=>0,'drive_ms'=>0,'sheets_ms'=>0,'token_ms'=>0,'response_bytes'=>0);
     public function __construct($cfg,$budget=18){$this->cfg=$cfg;$this->deadline=microtime(true)+$budget;}
@@ -238,6 +239,13 @@ final class BVLOG_Read_Cache {
           VALUES (%s,%s,'writer','','','',%d,%d,%d)",$id,$key,$now,$now+600,$now));
         if($ok!==1)throw new BVLOG_Direct_Error('cache_storage');
         self::rotate($key);return array('id'=>$id,'key'=>$key);
+    }
+    public static function clear_direct_writers($key){
+        // Only under the fenced incident's SQL writer lock, after reconciliation.
+        self::rotate($key);
+        global $wpdb;$table=self::table();
+        if($wpdb->query($wpdb->prepare("DELETE FROM $table WHERE doc_key=%s AND kind='writer'",$key))===false)
+            throw new BVLOG_Direct_Error('cache_storage');
     }
     public static function end_write($guard,$confirmed){
         // On uncertain commit/timeouts, keep the writer marker until expiry.

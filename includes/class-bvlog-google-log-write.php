@@ -2,9 +2,21 @@
 if (!defined('ABSPATH')) { exit; }
 
 /** Explicit write-scoped transport. No Drive file mutation in this first slice. */
+// Proven pre-dispatch or structured atomic rejection, not a lost ACK.
+final class BVLOG_Write_Rejected extends BVLOG_Direct_Error {}
 final class BVLOG_Google_Log_Write_Transport extends BVLOG_Google_Read_Transport {
     const WRITE_SCOPES='https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata.readonly';
     protected function scopes(){return self::WRITE_SCOPES;}
+    public function metadata($doc){
+        $reason=BVLOG_Direct_Scope::document_reason($doc,$this->cfg['template']);
+        if($reason!=='')throw new BVLOG_Direct_Error('scope_denied',403,$reason);
+        $file=$this->get('drive','https://www.googleapis.com/drive/v3/files/'.rawurlencode($doc),
+            array('fields'=>'id,name,mimeType,trashed,parents,version,capabilities(canEdit)','supportsAllDrives'=>'true'));
+        $meta=self::check_metadata($file,$doc,$this->cfg['folder'],$this->cfg['template']);
+        if(($file['capabilities']['canEdit']??false)!==true)
+            throw new BVLOG_Direct_Error('write_permission',403);
+        return $meta;
+    }
     public function log_snapshot($doc){
         if(!self::valid_id($doc))throw new BVLOG_Direct_Error('scope_denied',403);
         $raw=$this->get('sheets','https://sheets.googleapis.com/v4/spreadsheets/'.rawurlencode($doc),
@@ -31,20 +43,28 @@ final class BVLOG_Google_Log_Write_Transport extends BVLOG_Google_Read_Transport
             throw new BVLOG_Direct_Error('write_shape');
         $body=BVLOG_Direct_Crypto::json(array('requests'=>$requests,'includeSpreadsheetInResponse'=>false));
         if(strlen($body)>64000)throw new BVLOG_Direct_Error('write_shape');
-        $token=$this->token();
+        try{$token=$this->token();$timeout=$this->budget();}
+        catch(BVLOG_Direct_Error $e){throw new BVLOG_Write_Rejected($e->getMessage(),$e->status);}
         $url='https://sheets.googleapis.com/v4/spreadsheets/'.rawurlencode($doc).':batchUpdate';
         $start=microtime(true);$this->metrics['sheets_calls']++;
         try{
-            $r=wp_safe_remote_post($url,array('timeout'=>$this->budget(),'redirection'=>0,'sslverify'=>true,
+            $r=wp_safe_remote_post($url,array('timeout'=>$timeout,'redirection'=>0,'sslverify'=>true,
                 'httpversion'=>'1.1','limit_response_size'=>self::MAX_BYTES,
                 'headers'=>array('Authorization'=>'Bearer '.$token,'Content-Type'=>'application/json','Accept'=>'application/json'),
                 'body'=>$body));
         }finally{$this->metrics['sheets_ms']+=(int)round((microtime(true)-$start)*1000);}
         if(is_wp_error($r))throw new BVLOG_Direct_Error('write_unknown');
         $raw=(string)wp_remote_retrieve_body($r);$this->metrics['response_bytes']+=strlen($raw);
-        if((int)wp_remote_retrieve_response_code($r)!==200||strlen($raw)>=self::MAX_BYTES)
-            throw new BVLOG_Direct_Error('write_unknown');
+        $status=(int)wp_remote_retrieve_response_code($r);
+        if(strlen($raw)>=self::MAX_BYTES)throw new BVLOG_Direct_Error('write_unknown');
         $ack=json_decode($raw,true);
+        // Invalid/unauthorized atomic batch requests are rejected as a whole.
+        // A transport failure, malformed response or 5xx is NOT proof of rejection.
+        $rejections=array(400=>'INVALID_ARGUMENT',401=>'UNAUTHENTICATED',403=>'PERMISSION_DENIED',404=>'NOT_FOUND',429=>'RESOURCE_EXHAUSTED');
+        if(isset($rejections[$status])&&is_array($ack)&&
+            ($ack['error']['code']??null)===$status&&($ack['error']['status']??'')===$rejections[$status])
+            throw new BVLOG_Write_Rejected('write_rejected_'.$status,$status);
+        if($status!==200)throw new BVLOG_Direct_Error('write_unknown');
         if(!is_array($ack)||($ack['spreadsheetId']??'')!==$doc||
            !is_array($ack['replies']??null)||count($ack['replies'])!==count($requests))
             throw new BVLOG_Direct_Error('write_unknown');

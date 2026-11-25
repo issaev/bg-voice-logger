@@ -163,7 +163,7 @@ class BVLOG_SMS {
         $alias=substr(self::b64(hash_hmac('sha256','bvlog-sms-alias|'.$scope,wp_salt('auth'),true)),0,8);
         $g=array('alias'=>$alias,'scope'=>$scope,'doc_id'=>$doc,'device'=>$devices[0],'phone'=>$phone,
             'kind'=>$identity['kind'],'sub'=>(string)$identity['sub'],'email'=>(string)($identity['email']??''),
-            'name'=>sanitize_text_field((string)($identity['name']??'')),'expires'=>($day+7)*86400);
+            'name'=>BVLOG_API::author_name($identity['name']??''),'expires'=>($day+7)*86400);
         try {
             $id=self::key('grant',$alias);
             if(!self::put('grant',$id,$id,$id,$g,'READY',$g['expires']))return $result; // collision or changed identity: fail closed

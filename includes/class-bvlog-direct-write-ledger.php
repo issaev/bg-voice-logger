@@ -86,7 +86,10 @@ final class BVLOG_Direct_Write_Ledger {
 final class BVLOG_Direct_Write_Cache {
     public function begin($doc){return BVLOG_Read_Cache::begin_write($doc);}
     public function end($guard,$known){
-        try{BVLOG_Read_Cache::end_write($guard,$known);}
+        try{
+            BVLOG_Read_Cache::end_write($guard,$known);
+            if($known)BVLOG_Read_Cache::clear_direct_writers($guard['key']);
+        }
         catch(Throwable $e){
             // Never turn an authoritative Sheets ACK into failure on cache cleanup.
             try{update_option('bvlog_direct_last_guard_error',gmdate('c'),false);}catch(Throwable $ignore){}

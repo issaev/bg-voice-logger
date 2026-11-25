@@ -52,7 +52,9 @@ final class BVLOG_Direct_Log_Engine {
             // From this line onwards only a positive Sheets ACK or a matching
             // immutable receipt may release the durable reservation.
             $uncertain=true;
-            if($google->append_batch($doc,$plan['requests'])!==true)throw new BVLOG_Direct_Error('write_unknown');
+            try{
+                if($google->append_batch($doc,$plan['requests'])!==true)throw new BVLOG_Direct_Error('write_unknown');
+            }catch(BVLOG_Write_Rejected $e){$uncertain=false;throw $e;}
             $ledger->confirm($doc,$op,$hash,$plan['ack']);
             $confirmed=true;$uncertain=false;
             return $plan['ack'];
@@ -61,7 +63,7 @@ final class BVLOG_Direct_Log_Engine {
                 // Only the pre-dispatch path can remove an uncommitted reservation.
                 if($reserved&&!$uncertain&&!$confirmed)$ledger->cancel_before_dispatch($doc,$op,$hash);
             }finally{
-                try{if($guard!==null)$cache->end($guard,!$uncertain);}
+                try{if($guard!==null)$cache->end($guard,!$uncertain&&$ledger->active($doc)===null);}
                 finally{$ledger->unlock($lock);}
             }
         }

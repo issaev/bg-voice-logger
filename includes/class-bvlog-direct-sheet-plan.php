@@ -136,7 +136,8 @@ final class BVLOG_Direct_Sheet_Plan {
         if(isset($cell['userEnteredValue']['formulaValue'])||!empty($cell['hyperlink'])||
             !empty($cell['textFormatRuns'])||isset($cell['userEnteredFormat']['textFormat']['link']))self::fail('protected_range');
         foreach($s['merges'] as $m)if($r>=($m['startRowIndex']??0)&&$r<($m['endRowIndex']??$s['rows'])&&
-            $c>=($m['startColumnIndex']??0)&&$c<($m['endColumnIndex']??$s['cols']))self::fail('protected_range');
+            $c>=($m['startColumnIndex']??0)&&$c<($m['endColumnIndex']??$s['cols'])&&
+            ($r!==($m['startRowIndex']??0)||$c!==($m['startColumnIndex']??0)))self::fail('protected_range');
         $rule=$cell['dataValidation']['condition']??null;
         if($rule!==null){
             if(($rule['type']??'')!=='ONE_OF_LIST')self::fail('validation_type');
