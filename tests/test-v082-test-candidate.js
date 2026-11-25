@@ -134,7 +134,8 @@ async function runV082(app,gas,sw,css,php){
     database:async(action,storeName,v)=>action==='get'?store.get(v):store.set(v.id,v),
     api:async(path)=>new Promise(resolve=>pending.push({path,resolve})),
     dbName:()=>currentDB};
-  const exposed=readCode.replace(/\bDB\b/g,'dbName()');
+  const freshness=extract(app,'  function readSnapshotStamp(','  function today(time)');
+  const exposed=freshness+'\n'+readCode.replace(/\bDB\b/g,'dbName()');
   const read=new Function(...Object.keys(deps),exposed+'\nreturn {load:loadDocument,reset:resetView};')(...Object.values(deps));
   const tick=()=>Promise.resolve().then(()=>Promise.resolve()).then(()=>Promise.resolve());
   store.set(D+':LOG',{data:{LOG:['cached']}});

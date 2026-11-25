@@ -4,7 +4,8 @@ async function runV0822(app,css){
   const results=[];
   const begin=app.indexOf('    function tabSnapshotKey('),end=app.indexOf('    async function newDocument()',begin);
   check(begin>=0&&end>begin,'read function anchors');
-  const code=app.slice(begin,end).replace(/\bDB\b/g,'scopeName()');
+  const freshness=app.slice(app.indexOf('  function readSnapshotStamp('),app.indexOf('  function today(time)'));
+  const code=freshness+'\n'+app.slice(begin,end).replace(/\bDB\b/g,'scopeName()');
   let now=Date.UTC(2026,10,24,16),scope='operatorA',online=true,editing=false;
   class Clock extends Date{constructor(...x){super(...(x.length?x:[now]));}static now(){return now;}}
   const docRef={current:{id:'D1'}},pageRef={current:'LOG'},viewRef={current:{id:'D1',tab:'LOG',hasData:false}},
