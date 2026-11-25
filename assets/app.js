@@ -5,7 +5,7 @@
   const {useState, useEffect, useRef} = wp.element;
   const CFG = window.BVLOG_CONFIG || {};
   // Generated from this JS source with the build marker normalized.
-  const BVLOG_RUNNING_BUILD = '0.8.2.1-188c8b66fb21';
+  const BVLOG_RUNNING_BUILD = '0.8.3-5e7cf749a0ac';
   window.BVLOG_RUNNING_BUILD = BVLOG_RUNNING_BUILD;
   let DB = 'bg-voice-logger-queue-v2-user-' + String(CFG.user && CFG.user.id || '0');
   const ANONYMOUS = CFG.auth_mode === 'public' && !(CFG.user && CFG.user.id);
@@ -304,6 +304,97 @@
   function timeOf(time) {
     return new Date(time||Date.now()).toLocaleTimeString('bg-BG',{hour:'2-digit',minute:'2-digit',timeZone:'Europe/Sofia'});
   }
+  // SMS pilot protocol DK1. Readable independent SMS, never base64 the message text.
+  // grant alias 8 + full reversible UUID 22 + part/total 2+2. First part
+  // additionally holds UTC seconds 6, source 1 and 96-bit HMAC 16.
+  const SMS_MAX_PARTS=96;
+  const SMS_B64='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+  function smsB64(bytes){
+    let out='',bits=0,value=0;
+    for(const b of bytes){value=(value<<8)|b;bits+=8;while(bits>=6){bits-=6;out+=SMS_B64[(value>>>bits)&63];}}
+    if(bits)out+=SMS_B64[(value<<(6-bits))&63];return out;
+  }
+  function smsBytes(s){
+    if(!/^[A-Za-z0-9_-]+$/.test(s))throw Error('Invalid SMS credential');
+    let value=0,bits=0,out=[];
+    for(const c of s){value=(value<<6)|SMS_B64.indexOf(c);bits+=6;if(bits>=8){bits-=8;out.push((value>>>bits)&255);}}
+    const bytes=Uint8Array.from(out);
+    if(smsB64(bytes)!==s)throw Error('Invalid SMS credential');
+    return bytes;
+  }
+  function smsUuid(id){
+    const value=String(id||'').toLowerCase();
+    if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
+      throw Error('SMS requires an original event identifier');
+    return smsB64(Uint8Array.from(value.replace(/-/g,'').match(/../g),v=>parseInt(v,16)));
+  }
+  function smsUnits(s){
+    const basic="@\u00a3$\u00a5\u00e8\u00e9\u00f9\u00ec\u00f2\u00c7\n\u00d8\u00f8\r\u00c5\u00e5\u0394_\u03a6\u0393\u039b\u03a9\u03a0\u03a8\u03a3\u0398\u039e\u00c6\u00e6\u00df\u00c9 !\"#\u00a4%&'()*+,-./0123456789:;<=>?\u00a1ABCDEFGHIJKLMNOPQRSTUVWXYZ\u00c4\u00d6\u00d1\u00dc\u00a7\u00bfabcdefghijklmnopqrstuvwxyz\u00e4\u00f6\u00f1\u00fc\u00e0";
+    const ext='\f^{}\\[~]|\u20ac';
+    let septets=0;
+    for(const c of s){if(basic.includes(c))septets++;else if(ext.includes(c))septets+=2;else return {encoding:'Unicode',units:s.length,limit:70};}
+    return {encoding:'GSM-7',units:septets,limit:160};
+  }
+  function smsFits(s){const count=smsUnits(s);return count.units<=count.limit;}
+  function smsSegments(text,header){
+    // Work on graphemes when supported, otherwise fail closed for complex
+    // combining/ZWJ sequences instead of splitting a character.
+    let chars;
+    if(typeof Intl.Segmenter==='function')chars=Array.from(new Intl.Segmenter('bg',{granularity:'grapheme'}).segment(text),x=>x.segment);
+    else{
+      if(/[\p{M}\u200d\ufe0f]/u.test(text))throw Error('This browser cannot safely split this text');
+      chars=Array.from(text);
+    }
+    const chunks=[];let pos=0;
+    while(pos<chars.length){
+      const prefix=header(chunks.length===0);
+      let part='';
+      while(pos<chars.length&&smsFits(prefix+part+chars[pos]))part+=chars[pos++];
+      if(!part)throw Error('A character does not fit in one independent SMS');
+      chunks.push(part);
+      if(chunks.length>SMS_MAX_PARTS)throw Error('Too many SMS parts (maximum '+SMS_MAX_PARTS+')');
+    }
+    return chunks;
+  }
+  async function makeSmsPlan(entry,grant,signer){
+    const text=String(entry.text||'');
+    const stamp=Math.floor(Date.parse(entry.event_at)/1000);
+    const now=Math.floor(Date.now()/1000);
+    if(!text.trim()||text.length>3000||text!==text.trim()||!Number.isSafeInteger(stamp)||stamp<0||stamp>=36**6)
+      throw Error('Invalid original LOG event');
+    if(!grant||grant.doc_id!==entry.doc_id||!/^\+[1-9][0-9]{7,14}$/.test(grant.phone||'')||
+      !/^[A-Za-z0-9_-]{8}$/.test(grant.alias||'')||!Number.isSafeInteger(grant.expires)||grant.expires<=now)
+      throw Error('SMS configuration is missing or expired. Refresh INFO while online.');
+    const id=smsUuid(entry.op_id),ts=stamp.toString(36).padStart(6,'0'),source=entry.source==='text'?'T':'V';
+    const fixed='DK1'+grant.alias+id;
+    const placeholder=first=>fixed+'0101'+(first?ts+source+'AAAAAAAAAAAAAAAA':'')+'\n';
+    const chunks=smsSegments(text,placeholder),count=chunks.length;
+    // HMAC covers exact UTF-8 text, grant/doc/operator scope, original UUID,
+    // UTC seconds, source and part count. Never signs individual partial text as complete.
+    const total=count.toString(36).padStart(2,'0');
+    const canonical='DK1|'+grant.alias+'|'+id+'|'+ts+'|'+source+'|'+total+'|'+text;
+    const keyBytes=smsBytes(grant.key||'');
+    if(keyBytes.length!==32)throw Error('Invalid SMS key');
+    let signature;
+    if(signer)signature=await signer(keyBytes,canonical);
+    else{
+      if(!window.crypto?.subtle||typeof TextEncoder!=='function')throw Error('Secure SMS signing is unavailable');
+      const key=await window.crypto.subtle.importKey('raw',keyBytes,{name:'HMAC',hash:'SHA-256'},false,['sign']);
+      signature=new Uint8Array(await window.crypto.subtle.sign('HMAC',key,new TextEncoder().encode(canonical)));
+    }
+    const mac=smsB64(signature.slice(0,12));
+    if(mac.length!==16)throw Error('Invalid SMS signature');
+    const parts=chunks.map((chunk,i)=>{
+      const wire=fixed+(i+1).toString(36).padStart(2,'0')+total+(i===0?ts+source+mac:'')+'\n'+chunk;
+      if(!smsFits(wire))throw Error('SMS part is oversized');
+      return wire;
+    });
+    return {phone:grant.phone,doc_id:entry.doc_id,op_id:entry.op_id,expires:grant.expires,parts};
+  }
+  function smsComposerUrl(phone,text,ios){
+    if(!/^\+[1-9][0-9]{7,14}$/.test(phone))throw Error('Invalid SMS recipient');
+    return 'sms:'+phone+(ios?'&':'?')+'body='+encodeURIComponent(text);
+  }
   // One journal feed: an operation keeps the same identity from a local voice
   // recording through confirmation, upload and the first successful Sheets read.
   function journalEntries(queue,logs,docId,limit) {
@@ -528,6 +619,11 @@
     const [audioBusy,setAudioBusy]=useState('');
     const [unsavedAudio,setUnsavedAudio]=useState(null);
     const [docLoading,setDocLoading]=useState(false);
+    const [readActivity,setReadActivity]=useState(false);
+    // One active incident/identity only; never cache private data in HTTP or SW.
+    const tabCacheRef=useRef(new Map());
+    const prefetchOrder=['LOG','INFO','TECH','TEAM'];
+    const tabRefreshMs=120000;
     const [docLoadError,setDocLoadError]=useState('');
     const [lastFreshAt,setLastFreshAt]=useState('');
     const documentRequestRef=useRef(0);
@@ -547,6 +643,9 @@
     const [infoAdding,setInfoAdding]=useState(-1);
     const [infoRole,setInfoRole]=useState('');
     const [infoValues,setInfoValues]=useState([]);
+    const [smsDialog,setSmsDialog]=useState(null);
+    const [smsPreparing,setSmsPreparing]=useState(false);
+    const smsRequestRef=useRef(0);
     const [gallery,setGallery]=useState(null);
     const [galleryImage,setGalleryImage]=useState('');
     const [galleryBusy,setGalleryBusy]=useState(false);
@@ -778,8 +877,8 @@
       try{await api('auth/logout','POST',{});}catch(e){}
       closeAudioPlayer();photoDataCacheRef.current.clear();audioBlobCacheRef.current.clear();
       docsRequestRef.current++;documentRequestRef.current++;docRef.current=null;createScopeRef.current++;
-      clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
-      documentReadInFlightRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};
+      resetSessionReads();
+      viewRef.current={id:'',tab:'LOG',hasData:false};
       setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
       createPendingRef.current=null;setPendingCreate(null);setCreating(false);
       selectedDocRef.current='';selectedDocManualRef.current=false;
@@ -803,8 +902,7 @@
         : 'bg-voice-logger-queue-v2-user-'+String(CFG.user&&CFG.user.id||'0');
       if(DB!==newDB){
         docsRequestRef.current++;documentRequestRef.current++;createScopeRef.current++;
-        clearReadRetry();documentReadInFlightRef.current?.controller?.abort();
-        documentReadInFlightRef.current=null;docRef.current=null;
+        resetSessionReads();docRef.current=null;
         viewRef.current={id:'',tab:'LOG',hasData:false};pageRef.current='LOG';
         setDoc(null);setMode('choose');setData(null);setPage('LOG');
         setCachedView(false);setDocLoading(false);setLastFreshAt('');setDocLoadError('');
@@ -953,54 +1051,100 @@
     // Snapshot keys are tab-scoped in the same per-operator database. The old
     // whole-document snapshot is a read-only compatibility fallback.
     function tabSnapshotKey(id,tab){return id+':'+tab;}
-    function hasTabData(value,tab){
-      return !!value&&Array.isArray(value[tab]);
+    function hasTabData(value,tab){return !!value&&Array.isArray(value[tab]);}
+    function resetSessionReads(){
+      clearReadRetry();documentRequestRef.current++;
+      documentReadInFlightRef.current?.controller?.abort();
+      documentReadInFlightRef.current=null;tabCacheRef.current.clear();
+      smsRequestRef.current++;setSmsDialog(null);setSmsPreparing(false);
+      setReadActivity(false);setDocLoading(false);
     }
     function resetView(id,tab){
       viewRef.current={id,tab,hasData:false};
       setData(null);setCachedView(false);setLastFreshAt('');setDocLoadError('');
     }
-    async function loadDocument(id,automaticRetry=false,requestedTab,force=false) {
-      const tab=['LOG','INFO','TEAM','TECH'].includes(requestedTab)?requestedTab:pageRef.current;
+    function currentTabEntry(id,tab){
+      const entry=tabCacheRef.current.get(tab);
+      return entry&&entry.scope===DB&&entry.id===id?entry:null;
+    }
+    function rememberTab(id,tab,patch){
+      const entry=Object.assign({},currentTabEntry(id,tab)||{},patch,{id,scope:DB});
+      tabCacheRef.current.set(tab,entry);return entry;
+    }
+    function paintTab(id,tab,entry){
+      if(!entry||!hasTabData(entry.data,tab)||entry.scope!==DB||entry.id!==id||
+        docRef.current?.id!==id||pageRef.current!==tab)return false;
+      setData(entry.data);
+      setCachedView(!entry.live||!!entry.dirty||!navigator.onLine||
+        Date.now()-Date.parse(entry.stamp||'')>=tabRefreshMs);
+      setLastFreshAt(entry.live?entry.stamp:'');
+      setDocLoadError(entry.error||'');
+      viewRef.current={id,tab,hasData:true,stamp:entry.stamp,data:entry.data};return true;
+    }
+    function invalidateTabs(id,tabs){
+      if(id!==docRef.current?.id)return;
+      for(const tab of tabs){
+        const entry=currentTabEntry(id,tab);
+        if(entry)rememberTab(id,tab,{dirty:true,retryAt:0});
+      }
+      // A response started before a confirmed write must not overwrite its refresh.
+      const flight=documentReadInFlightRef.current;
+      if(flight&&flight.id===id&&tabs.includes(flight.tab)){
+        documentRequestRef.current++;flight.controller?.abort();
+        documentReadInFlightRef.current=null;setReadActivity(false);setDocLoading(false);
+      }
+      if(tabs.includes(pageRef.current))setCachedView(true);
+    }
+    async function loadDocument(id,automaticRetry=false,requestedTab,force=false,background=false) {
+      const tab=prefetchOrder.includes(requestedTab)?requestedTab:pageRef.current;
       const scope=DB;
-      if(id!==docRef.current?.id||tab!==pageRef.current)return false;
+      if(id!==docRef.current?.id||(!background&&tab!==pageRef.current))return false;
       const previousFlight=documentReadInFlightRef.current;
-      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab)return false;
-      if(!automaticRetry)clearReadRetry();
+      if(!force&&previousFlight?.id===id&&previousFlight.tab===tab){
+        if(!background){previousFlight.background=false;setDocLoading(true);}
+        return false;
+      }
+      if(background&&previousFlight)return false;
+      if(!background&&!automaticRetry)clearReadRetry();
       const request=++documentRequestRef.current;
       if(previousFlight?.controller)previousFlight.controller.abort();
       const controller=typeof AbortController==='function'?new AbortController():null;
-      documentReadInFlightRef.current={id,tab,request,controller};
-      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id&&tab===pageRef.current;
+      const flight={id,tab,request,controller,background};
+      documentReadInFlightRef.current=flight;
+      const current=()=>request===documentRequestRef.current&&scope===DB&&id===docRef.current?.id;
+      const visible=()=>current()&&tab===pageRef.current;
       const key=tabSnapshotKey(id,tab);
-      if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
-      setDocLoading(true);setDocLoadError('');
+      setReadActivity(true);
+      if(visible()){
+        if(viewRef.current.id!==id||viewRef.current.tab!==tab)resetView(id,tab);
+        if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+          paintTab(id,tab,currentTabEntry(id,tab));
+        setDocLoading(true);
+        // Keep a real error visible while retrying instead of flashing it off.
+        if(!viewRef.current.hasData)setDocLoadError('');
+      }
       async function showCached(){
+        if(currentTabEntry(id,tab)?.data)return true;
         try{
           let snap=await database('get','snapshots',key);
           if(!current())return false;
           if(!snap||!hasTabData(snap.data,tab))snap=await database('get','snapshots',id);
           if(!current()||!snap||!hasTabData(snap.data,tab))return false;
-          if(!viewRef.current.hasData){
-            setData(snap.data);setCachedView(true);
-            viewRef.current={id,tab,hasData:true};
-          }
+          const entry=rememberTab(id,tab,{data:snap.data,stamp:snap.updated||'',live:false});
+          if(visible()&&!viewRef.current.hasData)paintTab(id,tab,entry);
           return true;
         }catch(ignore){return false;}
       }
       try{
+        await showCached();
+        if(!current())return;
         if(!navigator.onLine){
-          const found=await showCached();
-          if(current()){
+          if(visible()){
             setCachedView(true);
-            if(!found&&!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
+            if(!viewRef.current.hasData)setDocLoadError('Няма офлайн копие на този раздел. Свържи се с интернет.');
           }
           return;
         }
-        // Paint an existing private snapshot quickly, but only live data can
-        // set the fresh timestamp. No private HTTP/Service Worker caching.
-        if(!viewRef.current.hasData)await showCached();
-        if(!current())return;
         const separator=String(CFG.api||'').includes('?')?'&':'?';
         const r=await api('document/'+encodeURIComponent(id)+separator+'tab='+tab,'GET',undefined,controller?.signal);
         if(!r.ok||r.id&&r.id!==id||!hasTabData(r.data,tab)||
@@ -1008,31 +1152,73 @@
           throw new Error(r.message||'Разделът не е потвърден от Google Sheets.');
         if(!current())return;
         const stamp=new Date().toISOString();
-        setData(r.data);setCachedView(false);setLastFreshAt(stamp);
-        viewRef.current={id,tab,hasData:true};
-        readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        const entry=rememberTab(id,tab,{data:r.data,stamp,live:true,dirty:false,error:'',retryAt:0,failures:0});
+        if(visible()){
+          // Do not replace an already visible edit target while a speculative
+          // read is completing. Apply on the next safe refresh/tab visit.
+          if(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false)
+            paintTab(id,tab,entry);
+          readBackoffRef.current={id,attempts:0,nextAt:0};clearReadRetry();
+        }
         try{await database('put','snapshots',{id:key,data:r.data,updated:stamp});}
-        catch(localError){if(current())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
+        catch(localError){if(visible())setNotice('Данните са заредени, но офлайн копието не е обновено.');}
       }catch(e){
         if(!current())return;
-        if(!viewRef.current.hasData)await showCached();
+        if(!currentTabEntry(id,tab)?.data)await showCached();
         if(!current())return;
-        const scheduled=scheduleReadRetry(id,e,automaticRetry);
-        setDocLoadError('Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
-          (viewRef.current.hasData?' Показани са последните налични данни.':'')+
-          (scheduled?' Автоматичен повторен опит е планиран.':''));
-        const previous=readBackoffRef.current;
-        const attempts=(previous.id===id?previous.attempts:0)+1;
-        readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        const previous=currentTabEntry(id,tab);
+        const scheduled=visible()&&scheduleReadRetry(id,e,automaticRetry);
+        const message='Разделът не е обновен: '+(e.message||'Неуспешно обновяване.')+
+          (previous?.data?' Показани са последните налични данни.':'')+
+          (scheduled?' Автоматичен повторен опит е планиран.':'');
+        const failures=(previous?.failures||0)+1;
+        const entry=rememberTab(id,tab,{dirty:true,error:message,failures,
+          retryAt:Date.now()+Math.min(900000,tabRefreshMs*Math.pow(2,Math.min(failures-1,3)))});
+        if(visible()){
+          if(entry.data&&(!viewRef.current.hasData||refreshRef.current?.safeToPaint!==false))paintTab(id,tab,entry);
+          setDocLoadError(message);setCachedView(!!entry.data);
+          const old=readBackoffRef.current,attempts=(old.id===id?old.attempts:0)+1;
+          readBackoffRef.current={id,attempts,nextAt:Date.now()+Math.min(15*60000,120000*Math.pow(2,Math.min(attempts-1,3)))};
+        }
       }finally{
-        if(documentReadInFlightRef.current?.request===request)documentReadInFlightRef.current=null;
-        if(current())setDocLoading(false);
+        if(documentReadInFlightRef.current?.request===request){
+          documentReadInFlightRef.current=null;setReadActivity(false);
+          if(current())setDocLoading(false);
+        }
       }
+    }
+    function nextPrefetchTab(id){
+      const now=Date.now();
+      const eligible=tab=>{
+        const entry=currentTabEntry(id,tab);
+        if(entry?.retryAt>now)return false;
+        // A scheduled foreground retry owns the active tab; other tabs may
+        // still refresh without repeatedly competing for that failed request.
+        const retry=readRetryRef.current;
+        return !(tab===pageRef.current&&retry.id===id&&!retry.exhausted);
+      };
+      // Finish warming all tabs before revisiting a warmed one.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&!currentTabEntry(id,tab)?.live)return tab;
+      // Dirty data first, then oldest successful refresh. The navigation order
+      // breaks ties, and slow requests cannot starve the last tab.
+      for(const tab of prefetchOrder)
+        if(eligible(tab)&&currentTabEntry(id,tab)?.dirty)return tab;
+      const due=prefetchOrder.filter(tab=>{
+        const entry=currentTabEntry(id,tab);
+        return eligible(tab)&&entry&&now-Date.parse(entry.stamp||'')>=tabRefreshMs;
+      });
+      due.sort((a,b)=>Date.parse(currentTabEntry(id,a).stamp)-Date.parse(currentTabEntry(id,b).stamp));
+      return due[0]||'';
+    }
+    function applyDeferredTab(id){
+      const tab=pageRef.current,entry=currentTabEntry(id,tab);
+      if(entry?.data&&entry.live&&!entry.dirty&&viewRef.current.data!==entry.data&&
+        refreshRef.current?.safeToPaint!==false)paintTab(id,tab,entry);
     }
     async function startSession(chosen,bootstrap) {
       if(!chosen||!checkOperatorName())return;
-      clearReadRetry();documentRequestRef.current++;
-      documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;
+      resetSessionReads();
       setDoc(chosen);docRef.current=chosen;pageRef.current='LOG';
       readBackoffRef.current={id:chosen.id,attempts:0,nextAt:0};
       setPage('LOG');setMode('session');resetView(chosen.id,'LOG');setError('');setSecondInfo(false);
@@ -1040,8 +1226,7 @@
       if(bootstrap&&bootstrap.id===chosen.id&&Array.isArray(bootstrap.loaded_tabs)&&
         bootstrap.loaded_tabs.includes('LOG')&&hasTabData(bootstrap.data,'LOG')){
         const stamp=new Date().toISOString();
-        setData(bootstrap.data);setCachedView(false);setLastFreshAt(stamp);setDocLoading(false);
-        viewRef.current={id:chosen.id,tab:'LOG',hasData:true};
+        paintTab(chosen.id,'LOG',rememberTab(chosen.id,'LOG',{data:bootstrap.data,stamp,live:true,dirty:false,error:''}));
         try{await database('put','snapshots',{id:tabSnapshotKey(chosen.id,'LOG'),data:bootstrap.data,updated:stamp});}
         catch(ignore){}
       }else await loadDocument(chosen.id,false,'LOG');
@@ -1052,8 +1237,21 @@
       if(editing||logEditor||rowAdd||infoAdding>=0){
         setError('Запази или откажи текущата редакция, преди да смениш раздела.');return;
       }
-      clearReadRetry();pageRef.current=tab;setPage(tab);resetView(docRef.current.id,tab);
-      loadDocument(docRef.current.id,false,tab);
+      const id=docRef.current.id;
+      clearReadRetry();readBackoffRef.current={id,attempts:0,nextAt:0};
+      pageRef.current=tab;setPage(tab);resetView(id,tab);
+      const entry=currentTabEntry(id,tab);
+      const shown=paintTab(id,tab,entry);
+      const fresh=shown&&entry.live&&!entry.dirty&&navigator.onLine&&Date.now()-Date.parse(entry.stamp)<tabRefreshMs;
+      setDocLoading(false);
+      // A warm tab renders without a new request. An uncached user choice
+      // supersedes speculative work; an identical in-flight read is adopted.
+      if(!fresh){
+        // Cached content is usable immediately. Do not abort a different tab's
+        // speculative read merely to revalidate content we already have.
+        if(!shown||!documentReadInFlightRef.current||documentReadInFlightRef.current.tab===tab)
+          loadDocument(id,false,tab);
+      }
     }
     async function newDocument() {
       if(createFlightRef.current||!checkOperatorName())return;
@@ -1213,6 +1411,7 @@
         hasLease=await syncLease(leaseOwner,false,scope);
         if(!hasLease)return;
         const items=(await database('getAll','queue')).sort((a,b)=>(a.created||'').localeCompare(b.created||''));
+        const touchedTabs=new Set();
         let touchedCurrent=false;
         for(const o of items){
           if(DB!==scope)return;
@@ -1295,7 +1494,17 @@
             if(r.ok){
               work.state='synced';work.error='';work.url=r.url||'';
               delete work.blob;delete work.preview_blob;delete work.next_retry;
-              if(docRef.current&&o.doc_id===docRef.current.id)touchedCurrent=true;
+              if(docRef.current&&o.doc_id===docRef.current.id){
+                touchedCurrent=true;
+                const affected=o.kind==='field'||o.kind==='add_row'?o.sheet:
+                  o.kind==='audio_upload'&&o.target_kind==='field'?o.field_sheet:
+                  ['log','log_change','photo','audio_upload'].includes(o.kind)?'LOG':'';
+                // Unknown operation types conservatively invalidate all tabs.
+                if(prefetchOrder.includes(affected))touchedTabs.add(affected);
+                else for(const tab of prefetchOrder)touchedTabs.add(tab);
+                // Invalidate at ACK, not just after the whole queue drains.
+                invalidateTabs(o.doc_id,[...touchedTabs]);
+              }
             }else if(['waiting_for_log','busy','incomplete_upload'].includes(r.code)){
               work.state='pending';work.error=r.message||'Изчаква се потвърждение.';
               work.attempts=(work.attempts||0)+1;
@@ -1331,8 +1540,10 @@
           o.state=work.state;
         }
         await refreshQueue();
-        // Coalesce all acknowledged LOG/INFO/media changes into one fresh read.
-        if(touchedCurrent && docRef.current && DB===scope)await loadDocument(docRef.current.id,false,undefined,true);
+        // Acknowledgments invalidate tabs. The background scheduler reads them
+        // after the write lease is released; no network read holds that lease.
+        if(touchedCurrent&&docRef.current&&DB===scope&&touchedTabs.has(pageRef.current))
+          setCachedView(true);
         const latest=await database('getAll','queue');
         const ready=latest.some(op=>op.state==='pending' && !op.next_retry &&
           ((op.kind!=='photo'&&op.kind!=='audio_upload')||
@@ -1370,8 +1581,7 @@
         loadDocs();syncAll();processAudioQueue();
         const refresh=refreshRef.current;
         if(readRetryRef.current.id)scheduleReadRetryTimer();
-        else if(refresh&&refresh.id===docRef.current?.id&&refresh.ready&&
-          !documentReadInFlightRef.current)refresh.load(refresh.id);
+        if(refresh&&refresh.id===docRef.current?.id)invalidateTabs(refresh.id,prefetchOrder);
       }};
       const visibility=()=>{
         if(document.hidden){requestBackgroundSync();return;}
@@ -1381,7 +1591,10 @@
         if(event.data&&event.data.type==='BVLOG_SYNC_UPDATED'){
           refreshQueue();
           const refresh=refreshRef.current;
-          if(refresh&&refresh.ready&&!documentReadInFlightRef.current)refresh.load(refresh.id);
+          if(refresh&&refresh.id&&refresh.id===docRef.current?.id){
+            invalidateTabs(refresh.id,prefetchOrder);
+            // Let the same background scheduler refresh the invalidated tabs.
+          }
         }
       };
       if(navigator.serviceWorker)navigator.serviceWorker.addEventListener('message',swUpdated);
@@ -1393,27 +1606,39 @@
 
     // Keep the timer stable across queue state changes and UI re-renders.
     // A fresh guard snapshot prevents a 45s queue refresh from endlessly postponing polling.
-    refreshRef.current={id:doc&&doc.id,ready:mode==='session'&&online&&!docLoading&&
-      !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
-      !unsavedAudio&&!draft.trim()&&!photos.length&&!queueOpen&&!gallery&&!logSaving&&
-      !rowSaving&&!photoBusy&&
-      !queue.some(o=>doc&&o.doc_id===doc.id&&!['synced','cancelled'].includes(o.state)),
+    refreshRef.current={id:doc&&doc.id,
+      safeToPaint:!recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&!logSaving&&!rowSaving,
+      prefetch:nextPrefetchTab,applyDeferred:applyDeferredTab,
+      backgroundReady:mode==='session'&&online&&!recording&&!fieldRecording&&!microphoneTest&&
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
+      ready:mode==='session'&&online&&!docLoading&&
+        !recording&&!fieldRecording&&!editing&&!logEditor&&!rowAdd&&infoAdding<0&&
+        !logSaving&&!rowSaving&&!photoBusy&&!audioBusy&&
+        !queue.some(o=>doc&&o.doc_id===doc.id&&o.state==='transcribing'),
       load:loadDocument};
     useEffect(()=>{
       if(mode!=='session'||!doc||!online)return;
       const id=doc.id;
-      const timer=window.setInterval(()=>{
+      // All tabs refresh independently, roughly every two minutes after their
+      // last successful response. A cheap timer schedules, not polls the server.
+      // At most one speculative read runs, and active interaction/writes win.
+      const warm=()=>{
         const fresh=refreshRef.current;
         if(document.hidden||!navigator.onLine||syncingRef.current||
-           !fresh||fresh.id!==id||!fresh.ready||docRef.current?.id!==id||
-           documentReadInFlightRef.current ||
-           (readBackoffRef.current.id===id && Date.now()<readBackoffRef.current.nextAt))return;
-        fresh.load(id);
-      },120000);
-      return()=>window.clearInterval(timer);
+          !fresh||fresh.id!==id||!fresh.backgroundReady||docRef.current?.id!==id||documentReadInFlightRef.current)return;
+        fresh.applyDeferred(id);
+        // Do not start a speculative read just before a due foreground retry.
+        const retry=readRetryRef.current;
+        if(retry.id===id&&!retry.exhausted&&retry.nextAt<=Date.now()&&fresh.ready)return;
+        const tab=fresh.prefetch(id);
+        if(tab)fresh.load(id,false,tab,false,true);
+      };
+      const warmTimer=window.setInterval(warm,1000);warm();
+      return()=>window.clearInterval(warmTimer);
     },[mode,doc&&doc.id,online]);
 
-    function closeSession() { if(recording||fieldRecording)return;clearReadRetry();documentRequestRef.current++;documentReadInFlightRef.current?.controller?.abort();documentReadInFlightRef.current=null;setDocLoading(false);setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
+    function closeSession() { if(recording||fieldRecording)return;resetSessionReads();setDocLoadError('');setLastFreshAt('');setCachedView(false);closeAudioPlayer();setDoc(null);docRef.current=null;viewRef.current={id:'',tab:'LOG',hasData:false};setData(null);setMode('choose');setCreating(false);setEditing(null);setError('');if(navigator.onLine)loadDocs(); }
     function openEdit(sheet,row,col,label,base,rowKey,metadata) {
       setEditing(Object.assign({sheet,row,col,label,base:base||'',row_key:rowKey||''},metadata||{}));
       setEditValue(base||'');
@@ -2075,6 +2300,44 @@
         await refreshQueue();if(doc)loadDocument(doc.id);
       }
     }
+    async function openSms(entry){
+      if(!CFG.sms_pilot||!entry||entry.kind!=='log'||entry.state==='cancelled'||entry.state==='conflict'||smsPreparing)return;
+      const id=docRef.current?.id,scope=DB,request=++smsRequestRef.current;
+      if(!id||entry.doc_id!==id)return;
+      setSmsPreparing(true);
+      try{
+        const info=currentTabEntry(id,'INFO');
+        // An authoritative in-memory INFO without a grant overrides an older
+        // cached grant. Only use the private snapshot if INFO is not loaded.
+        const snapshot=info?info.data:(await database('get','snapshots',tabSnapshotKey(id,'INFO')))?.data;
+        if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
+        const grant=snapshot?.SMS_PILOT;
+        if(navigator.onLine&&info?.dirty)throw Error('Опресни INFO: телефонът на координатора може да е променен.');
+        const plan=await makeSmsPlan(entry,grant);
+        if(scope!==DB||docRef.current?.id!==id||request!==smsRequestRef.current)return;
+        setSmsDialog(Object.assign({},plan,{index:0,copyStatus:'',opened:[]}));
+      }catch(e){
+        if(scope===DB&&docRef.current?.id===id&&request===smsRequestRef.current)setError('SMS: '+(e.message||'Опресни INFO при интернет.'));
+      }finally{if(request===smsRequestRef.current)setSmsPreparing(false);}
+    }
+    function smsEligible(entry){
+      return CFG.sms_pilot&&entry&&entry.kind==='log'&&entry.doc_id===doc?.id&&
+        !['cancelled','conflict'].includes(entry.state)&&typeof entry.text==='string'&&entry.text.trim()&&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(entry.op_id||'');
+    }
+    function smsAction(entry){
+      return smsEligible(entry)&&h(Button,{secondary:true,disabled:smsPreparing,onClick:()=>openSms(entry)},'SMS');
+    }
+    async function copySmsPart(){
+      if(!smsDialog)return;
+      const index=smsDialog.index,id=smsDialog.op_id,part=smsDialog.parts[index];
+      try{
+        await navigator.clipboard.writeText(part);
+        setSmsDialog(old=>old&&old.op_id===id&&old.index===index?Object.assign({},old,{copyStatus:'Копирано.'}):old);
+      }catch(e){
+        setSmsDialog(old=>old&&old.op_id===id?Object.assign({},old,{copyStatus:'Маркирай и копирай текста от полето.'}):old);
+      }
+    }
     const waiting=queue.filter(o=>o.state!=='synced'&&o.state!=='cancelled').length;
     const localSaveFailed=!!unsavedAudio;
     const queueAccessible=!!auth||CFG.auth_mode==='public';
@@ -2091,7 +2354,7 @@
     const title=doc&&doc.name||'Документ за координация на акция';
     function loadingRows(label){
       return h('div',{className:'bv-loading-rows',role:'status','aria-live':'polite'},
-        h('p',null,label||'Зареждане на данните от Google Sheets...'),
+        h('span',{className:'bv-sr-only'},label||'Зареждане на данните от Google Sheets...'),
         [0,1,2].map(i=>h('div',{className:'bv-skeleton-card',key:i,'aria-hidden':'true'},
           h('span',{className:'bv-skeleton-short'}),
           h('span',{className:'bv-skeleton-long'}),
@@ -2199,15 +2462,16 @@
       ) : h('main',{className:'bv-content bv-session'},
         h('div',{className:'bv-action-top'},
           h('div',null,h('span',{className:'bv-kicker'},B('AKTIVNA AKTSIYA')),h('h1',null,title),
-            doc&&doc.id&&h('a',{className:'bv-sheet-link',target:'_blank',rel:'noopener noreferrer',
-              href:doc.url||('https://docs.google.com/spreadsheets/d/'+encodeURIComponent(doc.id)+'/edit')},
-              icon('list',16),' ',B('Otvori tablitsata'))),
+            doc&&doc.id&&h('div',{className:'bv-sheet-row'},
+              h('a',{className:'bv-sheet-link',target:'_blank',rel:'noopener noreferrer',
+                href:doc.url||('https://docs.google.com/spreadsheets/d/'+encodeURIComponent(doc.id)+'/edit')},
+                icon('list',16),' ',B('Otvori tablitsata')),
+              h('span',{className:'bv-read-indicator'+(readActivity?' active':''),
+                role:'status','aria-live':'polite',title:readActivity?'Обновяване на данните':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Данни от Google Sheets'},
+                h('span',{className:'bv-loading-spinner','aria-hidden':'true'}),
+                h('span',{className:'bv-sr-only'},readActivity?'Обновяване на данните':'')))),
           h('div',{className:'bv-action-buttons'},
-            h('div',{className:'bv-fresh-label',role:'status'},
-              !online?'Офлайн копие':docLoadError?'Обновяването е неуспешно':
-              docLoading?(cachedView?'Кеширани данни · обновяване...':'Обновяване...'):
-                cachedView?'Локално копие · не е обновено':lastFreshAt?'Обновено '+timeOf(lastFreshAt):'Няма потвърдено обновяване',
-              h('small',null,page+' · автоматично: на 2 мин. при безопасни условия')),
+            (!online||cachedView&&!readActivity)&&h('span',{className:'bv-fresh-label',role:'status'},!online?'Офлайн':'Локално копие'),
             h('button',{className:'bv-icon-btn',type:'button',onClick:()=>loadDocument(doc.id),
               title:'Обнови данните от Google Sheets',disabled:docLoading||!online},icon('refresh',20)),
             h('button',{className:'bv-icon-btn',onClick:closeSession,title:B('Smeni aktsiyata'),disabled:recording},icon('logout',20)))),
@@ -2218,11 +2482,9 @@
           h('div',{className:'bv-banner error',role:'alert'},
             'Липсващи листове в Google Sheets: '+data.MISSING_TABS.join(', ')+
             '. Наличните раздели остават достъпни; не записвай в липсващ лист.'),
-        docLoading&&h('div',{className:'bv-loading-inline',role:'status','aria-live':'polite'},
-          h('span',{className:'bv-loading-spinner','aria-hidden':'true'}),data?'Обновяване на данните...':'Зареждане от Google Sheets...'),
-        docLoadError&&!docLoading&&h('div',{className:'bv-load-error',role:'alert'},
+        docLoadError&&h('div',{className:'bv-load-error',role:'alert'},
           h('span',null,docLoadError),
-          h('button',{type:'button',onClick:()=>loadDocument(doc.id)},'Опитай отново')),
+          h('button',{type:'button',disabled:docLoading||!online,onClick:()=>loadDocument(doc.id)},'Опитай отново')),
         page==='LOG' ? h('section',{className:'bv-log-page'},
           h('div',{className:'bv-recorder'},
             h('div',{className:'bv-recorder-controls'},
@@ -2284,6 +2546,7 @@
                         'Записано в Google · очаква опресняване'):
                       h(EntryStatus,{status:o.state,retryAt:o.next_retry})),
                     h('div',{className:'bv-event-controls'},
+                    smsAction(o),
                     (o.state==='audio'||o.state==='voice_review')&&voiceInputControls(o),
                     playable&&h(Button,{secondary:true,onClick:()=>playQueueAudio(playable)},
                       icon('play',15),' Чуй оригинала'),
@@ -2308,6 +2571,7 @@
                   !cancelled&&c[6]&&queue.some(o=>o.op_id===c[6]&&o.kind==='log')&&
                     h('span',{className:'bv-status good'},icon('check',14),'Синхронизирано')),
                   h('div',{className:'bv-event-controls'},h('div',{className:'bv-event-photos'},
+                    !cancelled&&smsAction(queue.find(o=>o.doc_id===doc?.id&&o.op_id===c[6]&&o.kind==='log')),
                     (x.photos||[]).length>0&&h('button',{className:'bv-photo-indicator',type:'button',
                       title:'Преглед на снимките към този LOG запис',onClick:()=>openGallery(x,0)},
                       icon('image',16),' Снимки (',(x.photos||[]).length,')'),
@@ -2331,6 +2595,12 @@
 
         ) : page==='INFO' ? h('section',{className:'bv-form-screen'},
           h('h2',null,B('Osnovni danni')),h('p',{className:'bv-muted'},B('Izberi pole, za da go promenish.')),
+          CFG.sms_pilot&&h('div',{className:'bv-card bv-sms-ready'},
+            h('strong',null,'SMS резервен канал · пилот'),
+            data?.SMS_PILOT&&data.SMS_PILOT.expires>Math.floor(Date.now()/1000)?
+              h('p',null,'Координатор: '+data.SMS_PILOT.phone+' · подготвен до '+new Date(data.SMS_PILOT.expires*1000).toLocaleString('bg-BG')):
+              h('p',null,'Не е подготвен. Нужни са валиден телефон, разрешен gateway и актуално INFO.'),
+            h('small',null,'Провери номера преди терен. Офлайн копието може да е остаряло.')),
           h(Button,{secondary:true,disabled:gpsBusy,onClick:usePhoneGPS},icon('map',17),' ',gpsBusy?'Определя GPS...':'GPS от телефона -> INFO / Локация'),
           data && Array.isArray(data.INFO_SECTIONS) && data.INFO_SECTIONS.length ?
             data.INFO_SECTIONS.map((section,sectionIndex)=>h('div',{className:'bv-info-section',key:sectionIndex},
@@ -2470,6 +2740,25 @@
           completedCount>0&&h('button',{className:'bv-retry-op',onClick:()=>setShowCompletedQueue(v=>!v)},
             showCompletedQueue?'Скрий приключените':'Покажи приключените ('+completedCount+')'),
           h(Button,{secondary:true,onClick:()=>setQueueOpen(false)},'Затвори'))),
+      smsDialog&&h('div',{className:'bv-modal-backdrop',onClick:()=>setSmsDialog(null)},
+        h('div',{className:'bv-modal bv-sms-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Изпращане по SMS'},
+          h('h3',null,'Изпрати събитие по SMS'),
+          h('p',null,'Координатор: '+smsDialog.phone+' · '+smsDialog.parts.length+' отделни SMS'),
+          h('p',{className:'bv-muted'},'Некриптиран текст. Не изпращай чувствителни лични или медицински данни. Провери номера.'),
+          h('strong',null,'Част '+(smsDialog.index+1)+' / '+smsDialog.parts.length+' · '+smsUnits(smsDialog.parts[smsDialog.index]).encoding),
+          smsDialog.parts.length>1&&h('p',{className:'bv-muted'},'Изпрати всяка част отделно. Получените части могат да се прочетат, но записът в Sheets чака всички.'),
+          h('textarea',{className:'bv-textarea bv-sms-wire',rows:5,readOnly:true,value:smsDialog.parts[smsDialog.index],onFocus:e=>e.target.select(),'aria-label':'SMS пакет'}),
+          h('div',{className:'bv-row'},
+            h(Button,{secondary:true,onClick:copySmsPart},'Копирай'),
+            smsDialog.expires>Math.floor(Date.now()/1000)&&h('a',{className:'bv-btn bv-sms-send',href:smsComposerUrl(smsDialog.phone,smsDialog.parts[smsDialog.index],iosInstallDevice()),
+              onClick:()=>setSmsDialog(old=>old&&Object.assign({},old,{opened:Array.from(new Set([...old.opened,old.index]))}))},'Отвори SMS')),
+          smsDialog.copyStatus&&h('small',null,smsDialog.copyStatus),
+          h('small',{className:'bv-muted'},'Отваряни части: '+smsDialog.opened.length+'/'+smsDialog.parts.length+'. Това не потвърждава изпращане. Избери SMS, не RCS/iMessage.'),
+          h('div',{className:'bv-row'},
+            h(Button,{secondary:true,disabled:smsDialog.index===0,onClick:()=>setSmsDialog(old=>Object.assign({},old,{index:old.index-1,copyStatus:''}))},'Предишна'),
+            h(Button,{secondary:true,disabled:smsDialog.index>=smsDialog.parts.length-1,onClick:()=>setSmsDialog(old=>Object.assign({},old,{index:old.index+1,copyStatus:''}))},'Следваща'),
+            h(Button,{secondary:true,onClick:()=>setSmsDialog(null)},'Затвори')),
+          h('small',null,'Оригиналният запис остава в опашката до потвърждение от Google Sheets.'))),
       logEditor&&h('div',{className:'bv-modal-backdrop',onClick:()=>setLogEditor(null)},
         h('div',{className:'bv-modal',onClick:e=>e.stopPropagation(),role:'dialog','aria-modal':'true','aria-label':'Редакция на LOG събитие'},
           h('h3',null,'Редактирай събитието'),

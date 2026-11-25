@@ -167,20 +167,52 @@ async function viaCloudflare(file,env,micActivity) {
     return {ok:true,text,provider:'cloudflare',model:STT_MODEL,quality};
   }catch(e){return {ok:false,code:'cloudflare_unavailable'};}
 }
+// Per-ticket SQLite-backed Durable Object. Synchronous transactions serialize
+// check + reservation across isolates. Never fall back to eventually-consistent KV.
+export class STTNonceGuard {
+  constructor(state){this.storage=state.storage;}
+  async fetch(request){
+    if(request.method!=='POST'||new URL(request.url).pathname!=='/reserve')
+      return new Response(null,{status:405});
+    const now=Date.now();
+    // Install the cleanup alarm before the reservation; failure is fail-closed.
+    // Each object is named by a single jti, and tickets expire within 180s.
+    await this.storage.setAlarm(now+300000);
+    const accepted=this.storage.transactionSync(()=>{
+      const used=this.storage.kv.get('used');
+      if(used!==undefined)return false;
+      this.storage.kv.put('used',now);
+      return true;
+    });
+    return new Response(null,{status:accepted?204:409});
+  }
+  async alarm(){await this.storage.deleteAll();}
+}
+async function reserveSttNonce(env,jti){
+  if(!env.STT_NONCE_GUARD)throw Error('Atomic nonce storage unavailable');
+  // During migration, reject tickets already consumed by the old KV worker.
+  // KV is NOT used as an authorization grant and is not the new write path.
+  if(env.STT_NONCES&&await env.STT_NONCES.get('stt:'+jti))return false;
+  const id=env.STT_NONCE_GUARD.idFromName('stt:'+jti);
+  const response=await env.STT_NONCE_GUARD.get(id).fetch('https://nonce.internal/reserve',{method:'POST'});
+  if(response.status===409)return false;
+  if(response.status!==204)throw Error('Atomic nonce reservation failed');
+  return true;
+}
 export default {
   async fetch(request,env) {
     const origin=request.headers.get('Origin')||'';
     const allowed=String(env.ALLOWED_ORIGIN||'');
     const endpoint=new URL(request.url);
     if(endpoint.pathname==='/health' && request.method==='GET') {
-      return json({ok:true,version:'0.6.1',prompt_profile:'sar-bg-v1',primary:!!env.GROQ_API_KEY,
-        fallback:!!env.AI,nonce_storage:!!env.STT_NONCES},200,'');
+      return json({ok:true,version:'0.6.2',prompt_profile:'sar-bg-v1',primary:!!env.GROQ_API_KEY,
+        fallback:!!env.AI,nonce_storage:!!env.STT_NONCE_GUARD,nonce_mode:'durable-object'},200,'');
     }
     if(endpoint.pathname!=='/stt/transcribe')return json({ok:false,code:'not_found'},404);
     if(!allowed || origin!==allowed)return json({ok:false,code:'origin_forbidden'},403);
     if(request.method==='OPTIONS')return json({ok:true},204,origin);
     if(request.method!=='POST')return json({ok:false,code:'method_not_allowed'},405,origin);
-    if(!env.STT_NONCES || !env.STT_RATE_LIMIT) {
+    if(!env.STT_NONCE_GUARD || !env.STT_RATE_LIMIT) {
       return json({ok:false,code:'worker_not_configured'},503,origin);
     }
     let claims;
@@ -194,10 +226,8 @@ export default {
     const limiter=await env.STT_RATE_LIMIT.limit({key:claims.sub});
     if(!limiter.success)return json({ok:false,code:'rate_limited',retryable:true},429,origin);
     try{
-      const nonceKey='stt:'+claims.jti;
-      if(await env.STT_NONCES.get(nonceKey))return json({ok:false,code:'ticket_reused'},409,origin);
-      // KV is eventually consistent, not a strict transactional one-use guarantee.
-      await env.STT_NONCES.put(nonceKey,'1',{expirationTtl:300});
+      if(!await reserveSttNonce(env,claims.jti))
+        return json({ok:false,code:'ticket_reused'},409,origin);
     }catch(e){return json({ok:false,code:'nonce_store_unavailable',retryable:true},503,origin);}
     let file, incomingMicActivity;
     try {

@@ -289,8 +289,10 @@ class BVLOG_API {
     }
     public static function document($request) {
         $tab=strtoupper(sanitize_key((string)$request->get_param('tab')));
-        return self::forward('read', array('doc_id' => sanitize_text_field($request['id']),
+        $doc=sanitize_text_field($request['id']);
+        $result=self::forward('read', array('doc_id'=>$doc,
             'tab' => in_array($tab,array('LOG','INFO','TEAM','TECH'),true)?$tab:''));
+        return $tab==='INFO'&&class_exists('BVLOG_SMS')?BVLOG_SMS::decorate($result,$doc):$result;
     }
     private static function operation_author($payload) {
         $identity=BVLOG_Auth::identity();
@@ -508,6 +510,7 @@ class BVLOG_API {
             $body['text'] = $text;
             $body['source'] = ($p['source'] ?? '') === 'text' ? 'text' : 'voice';
             $body['event_at'] = sanitize_text_field($p['event_at'] ?? '');
+            if(class_exists('BVLOG_SMS')&&($hash=BVLOG_SMS::normal_log_hash($body)))$body['payload_hash']=$hash;
         } elseif ($kind === 'field') {
             $sheet = sanitize_key($p['sheet'] ?? '');
             if (!in_array($sheet, array('info', 'team', 'tech'), true)) { return new WP_Error('bvlog_sheet', 'Invalid sheet.', array('status' => 400)); }
