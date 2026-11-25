@@ -77,13 +77,16 @@ final class BVLOG_Direct_Write {
     }
     private static function slots(){return array_keys(self::fences());}
     public static function verify_fence(){
-        if(!current_user_can('manage_options'))wp_die('Forbidden',403);
+        if(!current_user_can('manage_options'))wp_die('Forbidden','',array('response'=>403));
         check_admin_referer('bvlog_verify_write_fence');
         $slots=self::slots();$slot=isset($_POST['slot'])?absint($_POST['slot']):999;
         $status='fail';
         try{
             if(!isset($slots[$slot]))throw new BVLOG_Direct_Error('write_configuration');
             $doc=$slots[$slot];$cfg=self::config($doc);
+            // A failed re-verification must never leave an old positive proof.
+            delete_option($cfg['proof_key']);
+            if((int)get_option($cfg['proof_key'],0)!==0)throw new BVLOG_Direct_Error('write_storage');
             // This request acquires the same GAS script lock used by legacy
             // writes, so it cannot acknowledge the fence before those drain.
             $r=BVLOG_API::forward('writer_policy',array('doc_id'=>$doc));
@@ -91,8 +94,8 @@ final class BVLOG_Direct_Write {
             if(($data['ok']??false)!==true||($data['policy']??'')!=='direct_log_only_v1'||
                ($data['fence_rollout']??'')!==$cfg['rollout'])
                 throw new BVLOG_Direct_Error('write_fence_unverified');
-            update_option($cfg['proof_key'],time(),false);
-            if((int)get_option($cfg['proof_key'],0)<=0)throw new BVLOG_Direct_Error('write_storage');
+            $verified=time();update_option($cfg['proof_key'],$verified,false);
+            if((int)get_option($cfg['proof_key'],0)!==$verified)throw new BVLOG_Direct_Error('write_storage');
             $status='ok';
         }catch(Throwable $e){/* No document ID, raw Google response or key in admin notice. */}
         wp_safe_redirect(add_query_arg(array('page'=>'bvlog','write_fence'=>$status),admin_url('options-general.php')));exit;
